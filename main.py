@@ -25,6 +25,7 @@ print("✅ โมเดล EasyOCR พร้อมใช้งานแล้ว
 
 def process_roblox_image(image_bytes):
     global reader
+    
     nparr = np.frombuffer(image_bytes, np.uint8)
     image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     
