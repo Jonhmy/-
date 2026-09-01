@@ -6,14 +6,18 @@ from discord import app_commands
 from discord.ext import commands
 from PIL import Image
 import io
-import pytesseract  # 🔔 เปลี่ยนมาใช้ไลบรารีสแกนตัวหนังสือขนาดเล็ก
+import pytesseract
 import asyncio
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# 🔔 [เพิ่มบรรทัดนี้] สั่งชี้ทางให้โค้ดวิ่งไปเรียกใช้ Tesseract ของระบบ Linux บน Railway ได้ทันที
+pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
+
 TOKEN = os.getenv("DISCORD_TOKEN")
 MONTHLY_MAX_LIMIT = int(os.getenv("MONTHLY_MAX_LIMIT", 10000))
+# ... (หลังจากบรรทัดนี้ด้านล่างให้ใช้โค้ดเดิมทั้งหมดได้เลยครับ) ...
 
 intents = discord.Intents.default()
 intents.message_content = True
