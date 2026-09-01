@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # 🔔 [เพิ่มบรรทัดนี้] สั่งชี้ทางให้โค้ดวิ่งไปเรียกใช้ Tesseract ของระบบ Linux บน Railway ได้ทันที
-pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
+pytesseract.pytesseract.tesseract_cmd = 'tesseract'
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 MONTHLY_MAX_LIMIT = int(os.getenv("MONTHLY_MAX_LIMIT", 10000))
