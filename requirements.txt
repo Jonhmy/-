@@ -1,5 +1,4 @@
 discord.py
-easyocr
 pillow
-opencv-python-headless
+pytesseract
 python-dotenv
