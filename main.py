@@ -24,10 +24,10 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 def process_roblox_image_fast(image_bytes):
-    """ฟังก์ชันสแกนภาพเวอร์ชันล้างช่องว่าง ป้องกันระบบ OCR อ่านคำเว้นวรรคเพี้ยนบน Railway"""
+    """ฟังก์ชันสแกนภาพเวอร์ชันยืดหยุ่นสูงสุด ดักจับแค่วันเวลาและตัวเลขติดลบท้ายบรรทัด"""
     image = Image.open(io.BytesIO(image_bytes))
     
-    # สั่งเปิดสิทธิ์อ่านภาษาอังกฤษและตัวเลข
+    # ล็อกเป้าหมายการอ่านเฉพาะตัวอักษรภาษาอังกฤษและตัวเลข
     custom_config = r'--oem 3 --psm 6 -l eng'
     raw_text = pytesseract.image_to_string(image, config=custom_config)
     
@@ -38,30 +38,35 @@ def process_roblox_image_fast(image_bytes):
         if not line_str.strip():
             continue
             
-        # 1. ดักจับส่วนของวันเวลา (เช่น 08/15/26 6:03 PM) [cite: 2EADts.png]
+        # 1. ตรวจจับส่วนของวันเวลา (เช่น 08/15/26 6:03 PM) [cite: 2EADts.png]
         date_match = re.search(r'(\d{2}/\d{2}/\d{2})\s+(\d{1,2}:\d{2}\s*[APap][Mm])', line_str)
         
         if date_match:
             date_time_str = f"{date_match.group(1)} {date_match.group(2)}"
             date_time_str = re.sub(r'\s+', ' ', date_time_str)
             
-            # 🔔 [จุดแก้ไขเด็ดขาด] ลบช่องว่างและสัญลักษณ์หกเหลี่ยมออกให้หมดเพื่อป้องกันตัวย่อเพี้ยน
-            # จาก "Sent Robux to Shanny. - @400" จะกลายเป็น "sentrobuxtoshanny-400" [cite: 2EADts.png]
+            # ลบช่องว่างออกทั้งหมดเพื่อความสะอาดในการดึงตัวเลข
             clean_line = re.sub(r'\s+', '', line_str).lower()
-            clean_line = clean_line.replace('⬡', '').replace('@', '').replace('o', '')
             
-            # ใช้พิกัดค้นหาคำว่า sentrobuxto ตามด้วยชื่อและจำนวนเงินกลุ่มตัวเลขท้ายบรรทัด [cite: 2EADts.png]
-            roblox_match = re.search(r'sentrobuxto([a-z0-9_\.]+).*?-(\d+)', clean_line)
+            # แปลงตัวอักษรที่มักสับสนเป็นตัวเลขมาตรฐาน
+            clean_line = clean_line.replace('o', '0').replace('q', '0').replace('@', '0').replace('⬡', '0')
             
-            if roblox_match:
-                recipient = roblox_match.group(1)
-                amount = int(roblox_match.group(2))
+            # 🔔 [จุดแก้ไขสําคัญ] ดักจับตัวเลขชุดสุดท้ายที่อยู่หลังเครื่องหมายลบ (-) [cite: 2EADts.png]
+            # วิธีนี้จะไม่สนชื่อผู้รับเงินหรือสัญลักษณ์ไอคอนใดๆ ทั้งสิ้น ขอแค่มีเครื่องหมายลบกับตัวเลขด้านหลัง [cite: 2EADts.png]
+            amount_match = re.search(r'-(\d+)\s*$', clean_line)
+            
+            if amount_match:
+                amount = int(amount_match.group(1))
+                
+                # พยายามแกะชื่อผู้รับเงินแบบกว้างๆ (ถ้าเจอคำว่า to) ถ้าไม่เจอให้ใส่ชื่อพิกัดมาตรฐาน [cite: 2EADts.png]
+                name_match = re.search(r'to([a-z0-9_\.]+)', clean_line)
+                recipient = name_match.group(1) if name_match else "User"
                 
                 try:
                     tx_time = datetime.datetime.strptime(date_time_str, "%m/%d/%y %I:%M %p")
                     reset_time = tx_time + datetime.timedelta(days=30)
                     
-                    # ตรวจสอบวันเวลากับปัจจุบันเพื่อสะสมยอดคงเหลือรายเดือน
+                    # ตรวจสอบวันเวลากับปัจจุบันเพื่อใช้หักโควตาสรุปรายเดือน
                     if reset_time > datetime.datetime.now():
                         total_spent_in_image += amount
                     
@@ -76,6 +81,7 @@ def process_roblox_image_fast(image_bytes):
                     
     transactions.sort(key=lambda x: x["reset_datetime_obj"])
     return transactions, total_spent_in_image
+
 
 
 
