@@ -91,24 +91,24 @@ async def on_ready():
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดในการซิงค์คำสั่ง: {e}")
 
-# ⭐ สร้างคำสั่ง Slash Command ชื่อ /check
+# ⭐ สร้างคำสั่ง Slash Command ชื่อ /check (เวอร์ชันขยายเวลา Defer ป้องกัน Timeout)
 @bot.tree.command(name="check", description="ตรวจสอบประวัติการโอนและคำนวณโควตา Robux คงเหลือจากรูปภาพ")
 @app_commands.describe(image="แนบรูปภาพหน้าจอประวัติการซื้อขาย (My Transactions)")
 async def check_quota(interaction: discord.Interaction, image: discord.Attachment):
-    # ตรวจสอบนามสกุลไฟล์รูปภาพที่ผู้ใช้แนบเข้ามาในช่อง Slash Command
     if not any(image.filename.lower().endswith(ext) for ext in ['png', 'jpg', 'jpeg', 'webp']):
         await interaction.response.send_message("❌ ไฟล์ที่แนบมาไม่ใช่รูปภาพที่รองรับ (กรุณาใช้ png, jpg, jpeg, webp)", ephemeral=True)
         return
 
-    # ตอบกลับข้อความแรกเพื่อเริ่มการทำงาน (เพราะระบบ OCR ใช้เวลาประมวลผล)
-    await interaction.response.send_message("🔍 กำลังประมวลผลประวัติการโอนและคำนวณโควตาคงเหลือให้สักครู่นะครับ...")
+    # 🔔 [สำคัญมาก] สั่งขยายเวลาตอบกลับเพิ่มเป็น 15 นาที บอก Discord ให้จองคิวรอ CPU ทำงาน
+    await interaction.response.defer(thinking=True)
     
     try:
         image_bytes = await image.read()
         results, total_spent = process_roblox_image(image_bytes)
         
         if not results:
-            await interaction.edit_original_response(content="❌ ไม่พบข้อมูลธุรกรรมในรูปภาพนี้ กรุณาใช้รูปถ่ายที่ชัดเจนและสว่างขึ้นครับ")
+            # เปลี่ยนจาก edit_original_response เป็น followup.send
+            await interaction.followup.send("❌ ไม่พบข้อมูลธุรกรรมการโอน Robux ในรูปภาพนี้ กรุณาตรวจสอบว่ารูปภาพคมชัดครับ")
             return
         
         remaining_roblox_quota = MONTHLY_MAX_LIMIT - total_spent
@@ -121,7 +121,7 @@ async def check_quota(interaction: discord.Interaction, image: discord.Attachmen
         )
         
         embed.add_field(
-            name="💡 สถานะโควตาในปัจจุบันของคุณ",
+            name="💡 Status โควตาในปัจจุบันของคุณ",
             value=f"• ลิมิตบัญชีของคุณรายเดือน: `{MONTHLY_MAX_LIMIT:,}` Robux\n"
                   f"• ยอดโอนที่ใช้ไป (ในรูป): `{total_spent:,}` Robux\n"
                   f"• ➡️ **ตอนนี้คุณยังส่งได้อีก:** **`{remaining_roblox_quota:,}` Robux**",
@@ -137,12 +137,11 @@ async def check_quota(interaction: discord.Interaction, image: discord.Attachmen
                 inline=False
             )
             
-        # อัปเดตข้อความเดิมด้วยตาราง Embed สรุปผล
-        await interaction.edit_original_response(content=None, embed=embed)
+        # 🔔 ใช้ followup.send ส่งตาราง Embed กลับไปหลังจาก CPU ประมวลผลเสร็จ
+        await interaction.followup.send(embed=embed)
         
     except Exception as e:
         print(f"❌ Error occurred during process: {str(e)}")
-        await interaction.edit_original_response(
-            content=f"❌ **เกิดข้อผิดพลาดในระบบ:** ตัวประมวลผลรูปภาพเกิดปัญหาขัดข้อง\n`รายละเอียด: {str(e)}`"
+        await interaction.followup.send(f"❌ **เกิดข้อผิดพลาดในระบบ:** `รายละเอียด: {str(e)}`"
         )
 bot.run(TOKEN)
