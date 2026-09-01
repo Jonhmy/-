@@ -4,9 +4,10 @@ import datetime
 import discord
 from discord import app_commands
 from discord.ext import commands
-import easyocr
-import cv2
-import numpy as np
+from PIL import Image
+import io
+import pytesseract  # 🔔 เปลี่ยนมาใช้ไลบรารีสแกนตัวหนังสือขนาดเล็ก
+import asyncio
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -18,54 +19,24 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- ท่อนบนตรงตัวแปรเรียกใช้โมดูล (อัปเดตให้ล็อกความจำแคชและตัดพารามิเตอร์) ---
-print("📥 กำลังดาวน์โหลดและเตรียมโมเดล EasyOCR...")
-# สั่งปิดโหมดตรวจจับภาษาอื่น ล็อกเป้าเฉพาะภาษาอังกฤษคู่อักษรละตินพื้นฐาน
-reader = easyocr.Reader(['en'], model_storage_directory='.', gpu=False)
-print("✅ โมเดล EasyOCR พร้อมใช้งานแล้ว!")
-
-def process_roblox_image(image_bytes):
-    global reader
+def process_roblox_image_fast(image_bytes):
+    """ฟังก์ชันสแกนภาพเวอร์ชันกินแรมน้อยพิเศษ (Tesseract)"""
+    # เปิดรูปภาพด้วย Pillow
+    image = Image.open(io.BytesIO(image_bytes))
     
-    # แปลงข้อมูลภาพเข้าสู่ระบบ OpenCV
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    # 🔔 สั่งให้สแกนเจาะจงเฉพาะภาษาอังกฤษและตัวเลข (กินแรมน้อย เสร็จไวใน 1 วินาที)
+    custom_config = r'--oem 3 --psm 6 -l eng'
+    raw_text = pytesseract.image_to_string(image, config=custom_config)
     
-    # ⭐ [เพิ่มประสิทธิภาพ] สแกนแบบล็อกเป้าเฉพาะภาษาอังกฤษ ปรับพารามิเตอร์ให้อ่านไวขึ้น 5 เท่า
-    # - detail=1: ดึงเฉพาะพิกัดข้อความหลัก ไม่ดึงข้อมูลย่อยที่ไร้ประโยชน์
-    # - paragraph=False: ไม่ต้องเสียเวลานั่งจัดกลุ่มย่อหน้าขนาดยาว
-    results = reader.readtext(
-        image, 
-        decoder='greedy', 
-        beamWidth=1, 
-        batch_size=4,
-        workers=1,
-        detail=1,
-        paragraph=False
-    )
-    
-    lines = {}
-    for (bbox, text, prob) in results:
-        # ปรับความแม่นยำดักจับแกน Y ของบรรทัดประวัติโอน
-        ymin = int(bbox[0][1]) 
-        matched_line = None
-        for y_key in lines.keys():
-            if abs(ymin - y_key) < 18:  # ขยายขอบเขตจับกลุ่มแถวข้อความให้เสถียรขึ้น
-                matched_line = y_key
-                break
-        if matched_line is not None:
-            lines[matched_line].append(text)
-        else:
-            lines[ymin] = [text]
-            
-    sorted_lines = [lines[k] for k in sorted(lines.keys())]
     transactions = []
     total_spent_in_image = 0
     
-    for line in sorted_lines:
-        line_str = " ".join(line)
-        
-        # ค้นหา Date, Time, Amount, Recipient ตามปกติ
+    # แยกอ่านข้อความทีละบรรทัด
+    for line_str in raw_text.split('\n'):
+        if not line_str.strip():
+            continue
+            
+        # ค้นหา Date, Time, Amount, Recipient ตามรูปแบบสากล
         date_match = re.search(r'(\d{2}/\d{2}/\d{2})\s+(\d{1,2}:\d{2}\s*[APap][Mm])', line_str)
         amount_match = re.search(r'-\s*([\d,]+)', line_str)
         name_match = re.search(r'Sent\s+Robux\s+to\s+([a-zA-Z0-9_\.]+)', line_str, re.IGNORECASE)
@@ -98,17 +69,13 @@ def process_roblox_image(image_bytes):
 
 @bot.event
 async def on_ready():
-    print(f'🤖 บอตออนไลน์แล้วในชื่อ: {bot.user.name}')
+    print(f'🤖 บอตเปิดออนไลน์สำเร็จในชื่อ: {bot.user.name}')
     try:
-        # ⭐ ซิงค์คำสั่ง Slash Command ทั้งหมดไปยังระบบของ Discord ทั่วโลก
         synced = await bot.tree.sync()
         print(f"🔄 ซิงค์ Slash Commands สำเร็จแล้ว จำนวน {len(synced)} คำสั่ง")
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดในการซิงค์คำสั่ง: {e}")
-        
-import asyncio
 
-# ⭐ สร้างคำสั่ง Slash Command ชื่อ /check (เวอร์ชันผสานแยกเธรด + หลอดโหลด % เรียลไทม์ สมบูรณ์ 100%)
 @bot.tree.command(name="check", description="ตรวจสอบประวัติการโอนและคำนวณโควตา Robux คงเหลือจากรูปภาพ")
 @app_commands.describe(image="แนบรูปภาพหน้าจอประวัติการซื้อขาย (My Transactions)")
 async def check_quota(interaction: discord.Interaction, image: discord.Attachment):
@@ -116,27 +83,26 @@ async def check_quota(interaction: discord.Interaction, image: discord.Attachmen
         await interaction.response.send_message("❌ ไฟล์ที่แนบมาไม่ใช่รูปภาพที่รองรับ (กรุณาใช้ png, jpg, jpeg, webp)", ephemeral=True)
         return
 
-    # 1. ส่งข้อความเปิดตัวครั้งแรกทันที (ห้ามใช้ defer ซ้ำซ้อนเด็ดขาด)
+    # 1. เริ่มต้นระบบ (0%)
     await interaction.response.send_message("⏳ [░░░░░░░░░░] 0% • กำลังเตรียมไฟล์รูปภาพ...")
     
     try:
         # 2. อ่านข้อมูลภาพ (30%)
         image_bytes = await image.read()
-        await interaction.edit_original_response(content="⏳ [███░░░░░░░] 30% • กำลังอัปโหลดรูปภาพเข้าสู่ระบบ AI...")
+        await interaction.edit_original_response(content="⏳ [███░░░░░░░] 30% • กำลังอัปโหลดรูปภาพเข้าสู่ระบบ...")
         
-        # 3. สั่งสแกนตัวหนังสือ (60%)
-        await interaction.edit_original_response(content="⏳ [██████░░░░] 60% • AI กำลังอ่านตัวอักษรและวิเคราะห์ข้อมูลธุรกรรม...")
+        # 3. สั่งสแกนตัวหนังสือด้วย Tesseract (60%)
+        await interaction.edit_original_response(content="⏳ [██████░░░░] 60% • ระบบกำลังอ่านตัวอักษรและวิเคราะห์ข้อมูลธุรกรรม...")
         
-        # 🔔 แยกงานสแกนรูปภาพที่หนักหน่วงไปรันที่ Background Thread 
-        # วิธีนี้จะทำให้ส่งสัญญานหลอดโหลดได้เรื่อย ๆ โดยที่เครือข่าย Discord ไม่ขาดการติดต่อ
-        results, total_spent = await asyncio.to_thread(process_roblox_image, image_bytes)
+        # รันบน Thread เบื้องหลังเพื่อความลื่นไหล
+        results, total_spent = await asyncio.to_thread(process_roblox_image_fast, image_bytes)
         
         # 4. จัดเรียงข้อมูล (90%)
         await interaction.edit_original_response(content="⏳ [█████████░] 90% • กำลังคำนวณประวัติและจัดเรียงคิว Rolling Window...")
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)
 
         if not results:
-            await interaction.edit_original_response(content="❌ ไม่พบข้อมูลธุรกรรมการโอน Robux ในรูปภาพนี้ กรุณาตรวจสอบความคมชัดของรูปภาพครับ")
+            await interaction.edit_original_response(content="❌ ไม่พบข้อมูลธุรกรรมการโอน Robux ในรูปภาพนี้ กรุณาตรวจสอบว่าใช้รูปหน้าจอจากหน้า My Transactions โดยตรงครับ")
             return
         
         remaining_roblox_quota = MONTHLY_MAX_LIMIT - total_spent
@@ -144,7 +110,7 @@ async def check_quota(interaction: discord.Interaction, image: discord.Attachmen
             remaining_roblox_quota = 0
         
         embed = discord.Embed(
-            title="📊 สรุปประวัติและโควตา Robux คงเหลือ",
+            title="📊 Сรุปประวัติและโควตา Robux คงเหลือ",
             color=discord.Color.teal()
         )
         
@@ -165,11 +131,11 @@ async def check_quota(interaction: discord.Interaction, image: discord.Attachmen
                 inline=False
             )
             
-        # 5. สแกนเสร็จสมบูรณ์ (100%) สลับเอาตาราง Embed แสดงผลแทนที่หลอดโหลดทันที
+        # 5. สแกนเสร็จสมบูรณ์ (100%)
         await interaction.edit_original_response(content="✅ [██████████] 100% • ประมวลผลเสร็จสิ้น!", embed=embed)
         
     except Exception as e:
         print(f"❌ Error occurred during process: {str(e)}")
-        await interaction.edit_original_response(content=f"❌ **เกิดข้อผิดพลาดในการประมวลผล:** `รายละเอียด: {str(e)}`"
-        )
+        await interaction.edit_original_response(content=f"❌ **เกิดข้อผิดพลาดในการประมวลผล:** `รายละเอียด: {str(e)}`")
+
 bot.run(TOKEN)
