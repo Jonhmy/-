@@ -20,7 +20,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # 🔔 [ย้ายมาไว้ตรงนี้] บังคับให้บอตโหลดไฟล์โมเดล AI เตรียมพร้อมทันทีตั้งแต่เปิดเครื่อง
 print("📥 กำลังดาวน์โหลดและเตรียมโมเดล EasyOCR...")
-reader = easyocr.Reader(['en'])
+reader = easyocr.Reader(['en'], model_storage_directory='.')
 print("✅ โมเดล EasyOCR พร้อมใช้งานแล้ว!")
 
 def process_roblox_image(image_bytes):
