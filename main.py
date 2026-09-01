@@ -93,7 +93,7 @@ async def on_ready():
         
 import asyncio
 
-# ⭐ สร้างคำสั่ง Slash Command ชื่อ /check (เวอร์ชันแสดงหลอดโหลด % เรียลไทม์)
+# ⭐ สร้างคำสั่ง Slash Command ชื่อ /check (เวอร์ชันผสานแยกเธรด + หลอดโหลด % เรียลไทม์ สมบูรณ์ 100%)
 @bot.tree.command(name="check", description="ตรวจสอบประวัติการโอนและคำนวณโควตา Robux คงเหลือจากรูปภาพ")
 @app_commands.describe(image="แนบรูปภาพหน้าจอประวัติการซื้อขาย (My Transactions)")
 async def check_quota(interaction: discord.Interaction, image: discord.Attachment):
@@ -101,22 +101,22 @@ async def check_quota(interaction: discord.Interaction, image: discord.Attachmen
         await interaction.response.send_message("❌ ไฟล์ที่แนบมาไม่ใช่รูปภาพที่รองรับ (กรุณาใช้ png, jpg, jpeg, webp)", ephemeral=True)
         return
 
-    # 1. เริ่มต้นระบบ (0%)
+    # 1. ส่งข้อความเปิดตัวครั้งแรกทันที (ห้ามใช้ defer ซ้ำซ้อนเด็ดขาด)
     await interaction.response.send_message("⏳ [░░░░░░░░░░] 0% • กำลังเตรียมไฟล์รูปภาพ...")
     
     try:
-        # 2. อ่านไฟล์เข้าหน่วยความจำ (30%)
+        # 2. อ่านข้อมูลภาพ (30%)
         image_bytes = await image.read()
         await interaction.edit_original_response(content="⏳ [███░░░░░░░] 30% • กำลังอัปโหลดรูปภาพเข้าสู่ระบบ AI...")
-        await asyncio.sleep(0.5) # หน่วงเวลาสั้น ๆ เพื่อให้ Discord อัปเดตข้อความทัน
         
-        # 3. กำลังสแกนตัวหนังสือ (60%)
+        # 3. สั่งสแกนตัวหนังสือ (60%)
         await interaction.edit_original_response(content="⏳ [██████░░░░] 60% • AI กำลังอ่านตัวอักษรและวิเคราะห์ข้อมูลธุรกรรม...")
         
-        # แยกงานสแกนที่หนักหน่วงไปรันที่ Background Thread ป้องกันบอตค้าง
+        # 🔔 แยกงานสแกนรูปภาพที่หนักหน่วงไปรันที่ Background Thread 
+        # วิธีนี้จะทำให้ส่งสัญญานหลอดโหลดได้เรื่อย ๆ โดยที่เครือข่าย Discord ไม่ขาดการติดต่อ
         results, total_spent = await asyncio.to_thread(process_roblox_image, image_bytes)
         
-        # 4. คำนวณสรุปข้อมูล (90%)
+        # 4. จัดเรียงข้อมูล (90%)
         await interaction.edit_original_response(content="⏳ [█████████░] 90% • กำลังคำนวณประวัติและจัดเรียงคิว Rolling Window...")
         await asyncio.sleep(0.5)
 
@@ -150,7 +150,7 @@ async def check_quota(interaction: discord.Interaction, image: discord.Attachmen
                 inline=False
             )
             
-        # 5. ประมวลผลเสร็จสิ้น (100%) เปลี่ยนข้อความเป็นตาราง Embed สรุปสวยงาม
+        # 5. สแกนเสร็จสมบูรณ์ (100%) สลับเอาตาราง Embed แสดงผลแทนที่หลอดโหลดทันที
         await interaction.edit_original_response(content="✅ [██████████] 100% • ประมวลผลเสร็จสิ้น!", embed=embed)
         
     except Exception as e:
