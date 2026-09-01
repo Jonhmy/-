@@ -24,38 +24,41 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 def process_roblox_image_fast(image_bytes):
-    """ฟังก์ชันสแกนภาพเวอร์ชันกินแรมน้อยพิเศษ (Tesseract)"""
-    # เปิดรูปภาพด้วย Pillow
+    """ฟังก์ชันสแกนภาพเวอร์ชันอัปเกรดความแม่นยำดักจับตัวเลข Robux บน Railway"""
     image = Image.open(io.BytesIO(image_bytes))
     
-    # 🔔 สั่งให้สแกนเจาะจงเฉพาะภาษาอังกฤษและตัวเลข (กินแรมน้อย เสร็จไวใน 1 วินาที)
+    # ล็อกเป้าอ่านเฉพาะภาษาอังกฤษและตัวเลข
     custom_config = r'--oem 3 --psm 6 -l eng'
     raw_text = pytesseract.image_to_string(image, config=custom_config)
     
     transactions = []
     total_spent_in_image = 0
     
-    # แยกอ่านข้อความทีละบรรทัด
     for line_str in raw_text.split('\n'):
         if not line_str.strip():
             continue
             
-        # ค้นหา Date, Time, Amount, Recipient ตามรูปแบบสากล
+        # 1. ค้นหารูปแบบ วันเวลา (เช่น 08/15/26 6:03 PM) [cite: 2EADts.png]
         date_match = re.search(r'(\d{2}/\d{2}/\d{2})\s+(\d{1,2}:\d{2}\s*[APap][Mm])', line_str)
-        amount_match = re.search(r'-\s*([\d,]+)', line_str)
-        name_match = re.search(r'Sent\s+Robux\s+to\s+([a-zA-Z0-9_\.]+)', line_str, re.IGNORECASE)
         
-        if date_match and amount_match:
+        # 2. ปรับปรุงรูปแบบการค้นหาชื่อและจำนวนเงิน (เจาะจงคำว่า Sent Robux to ...) [cite: 2EADts.png]
+        # ดักจับชื่อผู้รับ และดึงตัวเลขกลุ่มท้ายสุดของบรรทัดมาใช้คำนวณโดยไม่สนสัญลักษณ์ Robux
+        roblox_match = re.search(r'Sent\s+Robux\s+to\s+([a-zA-Z0-9_\.]+).*?([\d,]+)\s*$', line_str, re.IGNORECASE)
+        
+        if date_match and roblox_match:
             date_time_str = f"{date_match.group(1)} {date_match.group(2)}"
             date_time_str = re.sub(r'\s+', ' ', date_time_str)
             
-            amount = int(amount_match.group(1).replace(',', ''))
-            recipient = name_match.group(1) if name_match else "ไม่ระบุชื่อ"
+            recipient = roblox_match.group(1)
+            # ดึงตัวเลขจำนวนเงินจำนวน Robux ออกมาลบเครื่องหมายจุลภาค
+            amount_str = roblox_match.group(2).replace(',', '')
+            amount = int(amount_str)
             
             try:
                 tx_time = datetime.datetime.strptime(date_time_str, "%m/%d/%y %I:%M %p")
                 reset_time = tx_time + datetime.timedelta(days=30)
                 
+                # ตรวจสอบว่าสิทธิ์อยู่ในรอบ Rolling Window 30 วันหรือไม่
                 if reset_time > datetime.datetime.now():
                     total_spent_in_image += amount
                 
@@ -70,6 +73,7 @@ def process_roblox_image_fast(image_bytes):
                 
     transactions.sort(key=lambda x: x["reset_datetime_obj"])
     return transactions, total_spent_in_image
+
 
 @bot.event
 async def on_ready():
