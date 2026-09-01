@@ -1,0 +1,5 @@
+discord.py
+easyocr
+pillow
+opencv-python
+python-dotenv
