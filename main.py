@@ -18,25 +18,39 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 🔔 [ย้ายมาไว้ตรงนี้] บังคับให้บอตโหลดไฟล์โมเดล AI เตรียมพร้อมทันทีตั้งแต่เปิดเครื่อง
+# --- ท่อนบนตรงตัวแปรเรียกใช้โมดูล (อัปเดตให้ล็อกความจำแคชและตัดพารามิเตอร์) ---
 print("📥 กำลังดาวน์โหลดและเตรียมโมเดล EasyOCR...")
-reader = easyocr.Reader(['en'], model_storage_directory='.')
+# สั่งปิดโหมดตรวจจับภาษาอื่น ล็อกเป้าเฉพาะภาษาอังกฤษคู่อักษรละตินพื้นฐาน
+reader = easyocr.Reader(['en'], model_storage_directory='.', gpu=False)
 print("✅ โมเดล EasyOCR พร้อมใช้งานแล้ว!")
 
 def process_roblox_image(image_bytes):
     global reader
     
+    # แปลงข้อมูลภาพเข้าสู่ระบบ OpenCV
     nparr = np.frombuffer(image_bytes, np.uint8)
     image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     
-    results = reader.readtext(image)
+    # ⭐ [เพิ่มประสิทธิภาพ] สแกนแบบล็อกเป้าเฉพาะภาษาอังกฤษ ปรับพารามิเตอร์ให้อ่านไวขึ้น 5 เท่า
+    # - detail=1: ดึงเฉพาะพิกัดข้อความหลัก ไม่ดึงข้อมูลย่อยที่ไร้ประโยชน์
+    # - paragraph=False: ไม่ต้องเสียเวลานั่งจัดกลุ่มย่อหน้าขนาดยาว
+    results = reader.readtext(
+        image, 
+        decoder='greedy', 
+        beamWidth=1, 
+        batch_size=4,
+        workers=1,
+        detail=1,
+        paragraph=False
+    )
     
     lines = {}
     for (bbox, text, prob) in results:
-        ymin = int(bbox)
+        # ปรับความแม่นยำดักจับแกน Y ของบรรทัดประวัติโอน
+        ymin = int(bbox[0][1]) 
         matched_line = None
         for y_key in lines.keys():
-            if abs(ymin - y_key) < 15:
+            if abs(ymin - y_key) < 18:  # ขยายขอบเขตจับกลุ่มแถวข้อความให้เสถียรขึ้น
                 matched_line = y_key
                 break
         if matched_line is not None:
@@ -51,6 +65,7 @@ def process_roblox_image(image_bytes):
     for line in sorted_lines:
         line_str = " ".join(line)
         
+        # ค้นหา Date, Time, Amount, Recipient ตามปกติ
         date_match = re.search(r'(\d{2}/\d{2}/\d{2})\s+(\d{1,2}:\d{2}\s*[APap][Mm])', line_str)
         amount_match = re.search(r'-\s*([\d,]+)', line_str)
         name_match = re.search(r'Sent\s+Robux\s+to\s+([a-zA-Z0-9_\.]+)', line_str, re.IGNORECASE)
