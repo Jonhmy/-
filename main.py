@@ -90,8 +90,10 @@ async def on_ready():
         print(f"🔄 ซิงค์ Slash Commands สำเร็จแล้ว จำนวน {len(synced)} คำสั่ง")
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดในการซิงค์คำสั่ง: {e}")
+        
+import asyncio
 
-# ⭐ สร้างคำสั่ง Slash Command ชื่อ /check (เวอร์ชันขยายเวลา Defer ป้องกัน Timeout)
+# ⭐ สร้างคำสั่ง Slash Command ชื่อ /check (เวอร์ชันแสดงหลอดโหลด % เรียลไทม์)
 @bot.tree.command(name="check", description="ตรวจสอบประวัติการโอนและคำนวณโควตา Robux คงเหลือจากรูปภาพ")
 @app_commands.describe(image="แนบรูปภาพหน้าจอประวัติการซื้อขาย (My Transactions)")
 async def check_quota(interaction: discord.Interaction, image: discord.Attachment):
@@ -99,16 +101,27 @@ async def check_quota(interaction: discord.Interaction, image: discord.Attachmen
         await interaction.response.send_message("❌ ไฟล์ที่แนบมาไม่ใช่รูปภาพที่รองรับ (กรุณาใช้ png, jpg, jpeg, webp)", ephemeral=True)
         return
 
-    # 🔔 [สำคัญมาก] สั่งขยายเวลาตอบกลับเพิ่มเป็น 15 นาที บอก Discord ให้จองคิวรอ CPU ทำงาน
-    await interaction.response.defer(thinking=True)
+    # 1. เริ่มต้นระบบ (0%)
+    await interaction.response.send_message("⏳ [░░░░░░░░░░] 0% • กำลังเตรียมไฟล์รูปภาพ...")
     
     try:
+        # 2. อ่านไฟล์เข้าหน่วยความจำ (30%)
         image_bytes = await image.read()
-        results, total_spent = process_roblox_image(image_bytes)
+        await interaction.edit_original_response(content="⏳ [███░░░░░░░] 30% • กำลังอัปโหลดรูปภาพเข้าสู่ระบบ AI...")
+        await asyncio.sleep(0.5) # หน่วงเวลาสั้น ๆ เพื่อให้ Discord อัปเดตข้อความทัน
         
+        # 3. กำลังสแกนตัวหนังสือ (60%)
+        await interaction.edit_original_response(content="⏳ [██████░░░░] 60% • AI กำลังอ่านตัวอักษรและวิเคราะห์ข้อมูลธุรกรรม...")
+        
+        # แยกงานสแกนที่หนักหน่วงไปรันที่ Background Thread ป้องกันบอตค้าง
+        results, total_spent = await asyncio.to_thread(process_roblox_image, image_bytes)
+        
+        # 4. คำนวณสรุปข้อมูล (90%)
+        await interaction.edit_original_response(content="⏳ [█████████░] 90% • กำลังคำนวณประวัติและจัดเรียงคิว Rolling Window...")
+        await asyncio.sleep(0.5)
+
         if not results:
-            # เปลี่ยนจาก edit_original_response เป็น followup.send
-            await interaction.followup.send("❌ ไม่พบข้อมูลธุรกรรมการโอน Robux ในรูปภาพนี้ กรุณาตรวจสอบว่ารูปภาพคมชัดครับ")
+            await interaction.edit_original_response(content="❌ ไม่พบข้อมูลธุรกรรมการโอน Robux ในรูปภาพนี้ กรุณาตรวจสอบความคมชัดของรูปภาพครับ")
             return
         
         remaining_roblox_quota = MONTHLY_MAX_LIMIT - total_spent
@@ -137,11 +150,11 @@ async def check_quota(interaction: discord.Interaction, image: discord.Attachmen
                 inline=False
             )
             
-        # 🔔 ใช้ followup.send ส่งตาราง Embed กลับไปหลังจาก CPU ประมวลผลเสร็จ
-        await interaction.followup.send(embed=embed)
+        # 5. ประมวลผลเสร็จสิ้น (100%) เปลี่ยนข้อความเป็นตาราง Embed สรุปสวยงาม
+        await interaction.edit_original_response(content="✅ [██████████] 100% • ประมวลผลเสร็จสิ้น!", embed=embed)
         
     except Exception as e:
         print(f"❌ Error occurred during process: {str(e)}")
-        await interaction.followup.send(f"❌ **เกิดข้อผิดพลาดในระบบ:** `รายละเอียด: {str(e)}`"
+        await interaction.edit_original_response(content=f"❌ **เกิดข้อผิดพลาดในการประมวลผล:** `รายละเอียด: {str(e)}`"
         )
 bot.run(TOKEN)
