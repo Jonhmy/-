@@ -1,5 +1,5 @@
 discord.py
 easyocr
 pillow
-opencv-python-headles
+opencv-python-headless
 python-dotenv
