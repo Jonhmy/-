@@ -2,7 +2,7 @@ import os
 import re
 import datetime
 import discord
-from discord import app_commands  # ⭐ นำเข้าโมดูลสำหรับ Slash Command
+from discord import app_commands
 from discord.ext import commands
 import easyocr
 import cv2
@@ -14,12 +14,14 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 MONTHLY_MAX_LIMIT = int(os.getenv("MONTHLY_MAX_LIMIT", 10000))
 
-# ตั้งค่าบอตพื้นฐาน
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# 🔔 [ย้ายมาไว้ตรงนี้] บังคับให้บอตโหลดไฟล์โมเดล AI เตรียมพร้อมทันทีตั้งแต่เปิดเครื่อง
+print("📥 กำลังดาวน์โหลดและเตรียมโมเดล EasyOCR...")
 reader = easyocr.Reader(['en'])
+print("✅ โมเดล EasyOCR พร้อมใช้งานแล้ว!")
 
 def process_roblox_image(image_bytes):
     nparr = np.frombuffer(image_bytes, np.uint8)
