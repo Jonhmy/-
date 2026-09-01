@@ -139,6 +139,8 @@ async def check_quota(interaction: discord.Interaction, image: discord.Attachmen
         await interaction.edit_original_response(content=None, embed=embed)
         
     except Exception as e:
-        await interaction.edit_original_response(content=f"เกิดข้อผิดพลาดในการอ่านรูปภาพ: {str(e)}")
-
+        print(f"❌ Error occurred during process: {str(e)}")
+        await interaction.edit_original_response(
+            content=f"❌ **เกิดข้อผิดพลาดในระบบ:** ตัวประมวลผลรูปภาพเกิดปัญหาขัดข้อง\n`รายละเอียด: {str(e)}`"
+        )
 bot.run(TOKEN)
