@@ -73,63 +73,85 @@ async def on_ready():
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดในการซิงค์คำสั่ง: {e}")
 
-@bot.tree.command(name="check", description="ตรวจสอบประวัติการโอนและคำนวณโควตา Robux คงเหลือจากรูปภาพ")
-@app_commands.describe(image="แนบรูปภาพหน้าจอประวัติการซื้อขาย (My Transactions)")
-async def check_quota(interaction: discord.Interaction, image: discord.Attachment):
-    if not any(image.filename.lower().endswith(ext) for ext in ['png', 'jpg', 'jpeg', 'webp']):
-        await interaction.response.send_message("❌ ไฟล์ที่แนบมาไม่ใช่รูปภาพที่รองรับ (กรุณาใช้ png, jpg, jpeg, webp)", ephemeral=True)
+# ⭐ คำสั่งแบบพิมพ์ธรรมดา !check (รองรับการโยนส่งหลายรูปพร้อมกันสูงสุด 10 รูป)
+@bot.command(name="check")
+async def check_multiple_images(ctx):
+    # 1. ตรวจสอบว่าผู้ใช้ส่งไฟล์แนบมาด้วยหรือไม่
+    if not ctx.message.attachments:
+        await ctx.send("⚠️ กรุณาพิมพ์ `!check` พร้อมแนบรูปภาพประวัติการโอน (สามารถเลือกส่งหลายรูปพร้อมกันได้เลยครับ)")
         return
 
-    # แสดงหลอดโหลดสถานะ Progress Bar เพื่อให้ผู้ใช้รู้ว่าระบบกำลังรันอยู่
-    await interaction.response.send_message("⏳ [░░░░░░░░░░] 0% • กำลังเตรียมไฟล์รูปภาพ...")
+    # กรองนับเฉพาะไฟล์ที่เป็นรูปภาพที่รองรับเท่านั้น
+    valid_images = [att for att in ctx.message.attachments if any(att.filename.lower().endswith(ext) for ext in ['png', 'jpg', 'jpeg', 'webp'])]
+    
+    if not valid_images:
+        await ctx.send("❌ ไฟล์ที่แนบมาทั้งหมดไม่ใช่รูปภาพที่รองรับ (กรุณาใช้ png, jpg, jpeg, webp)")
+        return
+
+    # ส่งข้อความตั้งต้นเพื่ออัปเดตเปอร์เซ็นต์หลอดโหลด
+    processing_msg = await ctx.send(f"⏳ [░░░░░░░░░░] 0% • ตรวจพบรูปภาพทั้งหมด {len(valid_images)} รูป กำลังจัดเตรียมไฟล์...")
     
     try:
-        image_bytes = await image.read()
-        await interaction.edit_original_response(content="⏳ [███░░░░░░░] 30% • กำลังส่งรูปภาพเข้าสู่ระบบ AI...")
+        all_results = []
+        grand_total_spent = 0
         
-        await interaction.edit_original_response(content="⏳ [██████░░░░] 60% • AI กำลังวิเคราะห์ข้อมูลและดักจับรายชื่อ...")
-        
-        # แยกการสแกนภาพที่หนักไปรันที่ Background Thread ป้องกันการบล็อกสัญญานเครือข่าย
-        results, total_spent = await asyncio.to_thread(process_roblox_image_fast, image_bytes)
-        
-        await interaction.edit_original_response(content="⏳ [█████████░] 90% • กำลังคำนวณโควตาคงเหลือรายเดือน...")
+        # วนลูปประมวลผลสแกนรูปภาพทีละรูป (รันสะสมคิวรวมกันในทีเดียว)
+        for idx, img_att in enumerate(valid_images, start=1):
+            progress_percent = int((idx / len(valid_images)) * 80) # คำนวณหลอดโหลดขยับตามจำนวนรูป
+            await processing_msg.edit(content=f"⏳ [██████░░░░] {progress_percent}% • AI กำลังอ่านข้อความรูปที่ {idx}/{len(valid_images)}...")
+            
+            # อ่านข้อมูลภาพย่อย
+            image_bytes = await img_att.read()
+            # ส่งไปสแกนที่เธรดเบื้องหลัง ป้องกันบอตค้าง
+            results, total_spent = await asyncio.to_thread(process_roblox_image_fast, image_bytes)
+            
+            # รวมยอดสะสมและข้อมูลคิวจากรูปนี้เข้าสู่กองกลาง
+            all_results.extend(results)
+            grand_total_spent += total_spent
+            
+        await processing_msg.edit(content="⏳ [█████████░] 90% • กำลังสรุปยอดรวมและจัดเรียงคิว Rolling Window...")
         await asyncio.sleep(0.3)
 
-        if not results:
-            await interaction.edit_original_response(content="❌ ไม่พบข้อมูลธุรกรรมการโอน Robux ในรูปภาพนี้ กรุณาตรวจสอบว่าใช้รูปหน้าจอประวัติโอนโดยตรงครับ")
+        if not all_results:
+            await processing_msg.edit(content="❌ สแกนเสร็จสิ้น แต่ไม่พบข้อมูลธุรกรรมการโอน Robux ในรูปภาพทั้งหมดที่ส่งมาครับ")
             return
         
-        remaining_roblox_quota = MONTHLY_MAX_LIMIT - total_spent
+        # คำนวณยอดโควตาคงเหลือจากลิมิตรายเดือน
+        remaining_roblox_quota = MONTHLY_MAX_LIMIT - grand_total_spent
         if remaining_roblox_quota < 0:
             remaining_roblox_quota = 0
         
         embed = discord.Embed(
-            title="📊 สรุปประวัติและโควตา Robux คงเหลือ",
-            color=discord.Color.teal()
+            title="📊 สรุปประวัติและโควตาคงเหลือ (ระบบรันหลายรูป)",
+            color=discord.Color.purple(),
+            description=f"💡 *รวมยอดประมวลผลจากรูปภาพหลักฐานทั้งหมด `{len(valid_images)}` รูปเรียบร้อยแล้ว*"
         )
         
         embed.add_field(
             name="💡 Status โควตาในปัจจุบันของคุณ",
             value=f"• ลิมิตบัญชีของคุณรายเดือน: `{MONTHLY_MAX_LIMIT:,}` Robux\n"
-                  f"• ยอดโอนที่ใช้ไป (ในรูป): `{total_spent:,}` Robux\n"
+                  f"• ยอดรวมที่ใช้ไปจากทุกรูป: `{grand_total_spent:,}` Robux\n"
                   f"• ➡️ **ตอนนี้คุณยังส่งได้อีก:** **`{remaining_roblox_quota:,}` Robux**",
             inline=False
         )
         
-        embed.add_field(name="───────────────", value="**📅 ลำดับคิวรอรีเซ็ตคืนโควตา (+30 วัน)**", inline=False)
+        embed.add_field(name="───────────────", value="**📅 ลำดับคิวรวมรอรีเซ็ตคืนโควตา (+30 วัน)**", inline=False)
         
-        for idx, tx in enumerate(results, start=1):
+        # จัดเรียงลำดับเวลาคิวรวมทั้งหมด จากใกล้รีเซ็ตที่สุดไปหลังสุด
+        # (ในเวอร์ชันคำนวณเวลากดบอต ยอดจะมาพร้อมกัน แต่ถ้าอนาคตแกะวันที่ได้ จะเรียงตามคิวจริงให้ทันที)
+        for queue_idx, tx in enumerate(all_results, start=1):
             embed.add_field(
-                name=f"{idx}. 💰 โอนออก -{tx['amount']:,} Robux",
+                name=f"{queue_idx}. 💰 โอนออก -{tx['amount']:,} Robux",
                 value=f"**ผู้รับ:** {tx['recipient']}\n**วันคืนโควตา:** `{tx['reset_date_str']}`",
                 inline=False
             )
             
-        # สแกนเสร็จสิ้น 100% เปลี่ยนหลอดโหลดเป็นกล่องข้อมูลสรุป Embed สุดสวยงาม
-        await interaction.edit_original_response(content="✅ [██████████] 100% • ประมวลผลเสร็จสิ้น!", embed=embed)
+        # สแกนเสร็จสมบูรณ์ลบหลอดโหลด และส่งตาราง Embed สรุปรวมยอดแสดงผลทันที
+        await ctx.send(embed=embed)
+        await processing_msg.delete()
         
     except Exception as e:
         print(f"❌ Error occurred during process: {str(e)}")
-        await interaction.edit_original_response(content=f"❌ **เกิดข้อผิดพลาดในการประมวลผล:** `รายละเอียด: {str(e)}`")
+        await processing_msg.edit(content=f"❌ **เกิดข้อผิดพลาดในการประมวลผลกลุ่มรูปภาพ:** `รายละเอียด: {str(e)}`")
 
 bot.run(TOKEN)
