@@ -21,59 +21,69 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 def process_roblox_image_fast(image_bytes):
-    image = Image.open(io.BytesIO(image_bytes))
+    image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
     width, height = image.size
     
-    # 1. ครอบตัดเฉพาะพื้นที่ฝั่งขวา (ประมาณ 20% ถึง 100% ของความกว้าง)
-    # เพื่อตัดคอลัมน์ชื่อผู้โอน (KORN2_FF) ด้านซ้ายออก ป้องกัน OCR อ่านบรรทัดสลับกัน
-    crop_box = (int(width * 0.20), 0, width, height)
-    cropped_image = image.crop(crop_box)
-    
-    # 2. อ่านข้อความโดยใช้ภาษาอังกฤษและภาษาญี่ปุ่นร่วมกัน
+    # 🔔 1. อ่านรูปเต็มแบบ PSM 6 เพื่อดึงพิกัดและข้อความเรียงตามบรรทัด
     custom_config = r'--oem 3 --psm 6 -l eng+jpn'
-    raw_text = pytesseract.image_to_string(cropped_image, config=custom_config)
+    data = pytesseract.image_to_data(image, config=custom_config, output_type=pytesseract.Output.DICT)
     
+    # จัดกลุ่มข้อความตามบรรทัด (line_num และ block_num)
+    lines_dict = {}
+    n_boxes = len(data['text'])
+    for i in range(n_boxes):
+        text = data['text'][i].strip()
+        if not text:
+            continue
+        line_key = (data['block_num'][i], data['line_num'][i])
+        if line_key not in lines_dict:
+            lines_dict[line_key] = []
+        lines_dict[line_key].append(text)
+
     transactions = []
     total_spent_in_image = 0
-    
-    for line_str in raw_text.split('\n'):
-        line = line_str.strip()
-        if not line:
-            continue
-            
-        # กรองรายการที่ไม่ใช่การโอนออกทิ้ง
-        if any(k in line.lower() for k in ['received', 'unable to send']):
+    current_date_str = None
+
+    # 🔔 2. วนลูปอ่านทีละบรรทัดเพื่อจับคู่ วันเวลา + รายการโอน
+    for line_key, words in lines_dict.items():
+        line_str = " ".join(words)
+        
+        # ข้ามรายการรับเงิน หรือรายการที่ส่งไม่สำเร็จ
+        if any(k in line_str.lower() for k in ['received', 'unable to send']):
             continue
 
-        # 3. Regex ดักจับ: 
-        # Group 1: วันที่และเวลาจริงจากสลิป (เช่น 08/30/26 9:10 PM)
-        # Group 2: ชื่อผู้รับ (ข้อความหลัง Sent Robux to)
-        # Group 3: ยอด Robux ท้ายบรรทัด
-        pattern = r'(\d{2}/\d{2}/\d{2}\s+\d{1,2}:\d{2}\s*(?:AM|PM)?).*?Sent\s+Robux\s+to\s+(.+?)\s*-\s*.*?(\d[\d,]*)'
-        match = re.search(pattern, line, re.IGNORECASE)
+        # ดักจับ "วันเวลา" ฝั่งซ้าย (เช่น 08/30/26 9:10 PM หรือ 08/30/26 9:10PM)
+        date_match = re.search(r'(\d{2}/\d{2}/\d{2})\s*(\d{1,2}:\d{2}\s*(?:AM|PM)?)', line_str, re.IGNORECASE)
+        if date_match:
+            d_part = date_match.group(1)
+            t_part = date_match.group(2).strip()
+            current_date_str = f"{d_part} {t_part}"
+
+        # ดักจับ "รายการโอน" (Sent Robux to ...)
+        sent_match = re.search(r'Sent\s+Robux\s+to\s+(.+?)\s*-\s*.*?(\d[\d,]*)', line_str, re.IGNORECASE)
         
-        if match:
-            date_str = match.group(1).strip()
-            recipient = match.group(2).strip()
-            # ตัดอักขระขยะท้ายชื่อออก เช่น จุด หรือ ขีด
-            recipient = re.sub(r'[\.\-\s]+$', '', recipient)
+        if sent_match:
+            recipient = sent_match.group(1).strip()
+            recipient = re.sub(r'[\.\-\s]+$', '', recipient) # ตัดจุด/ขีด ท้ายชื่อ
             
-            amount_str = match.group(3).replace(',', '')
-            amount = int(amount_str)
+            amount = int(sent_match.group(2).replace(',', ''))
             
-            # คำนวณวันรีเซ็ตโควตาอิงตามวันเวลาจริงในสลิป + 30 วัน
-            try:
-                # แปลง Text วันเวลาจากสลิปเป็น Obj (รองรับทั้งแบบมี AM/PM และไม่มี)
-                if "AM" in date_str.upper() or "PM" in date_str.upper():
-                    txn_date = datetime.datetime.strptime(date_str, "%m/%d/%y %I:%M %p")
-                else:
-                    txn_date = datetime.datetime.strptime(date_str, "%m/%d/%y %H:%M")
-                reset_date = txn_date + datetime.timedelta(days=30)
-                reset_date_str = reset_date.strftime("%d/%m/%Y เวลา %H:%M น.")
-            except Exception:
-                # กรณีอ่านวันเวลาเพี้ยน ให้ใช้วันปัจจุบัน + 30 วันสำรองไว้
-                reset_date_str = (datetime.datetime.now() + datetime.timedelta(days=30)).strftime("%d/%m/%Y เวลา %H:%M น.")
-            
+            # 🔔 3. แปลงวันเวลาจากสลิปภาพ แล้วบวกเพิ่ม 30 วันตรงๆ
+            reset_date_str = "ไม่สามารถระบุวันเวลาจากรูปได้"
+            if current_date_str:
+                try:
+                    # แปลงปี 26 เป็น 2026
+                    if "AM" in current_date_str.upper() or "PM" in current_date_str.upper():
+                        txn_date = datetime.datetime.strptime(current_date_str, "%m/%d/%y %I:%M %p")
+                    else:
+                        txn_date = datetime.datetime.strptime(current_date_str, "%m/%d/%y %H:%M")
+                    
+                    # บวกเพิ่ม 30 วันนับจาก Timestamp ในรูป
+                    reset_date = txn_date + datetime.timedelta(days=30)
+                    reset_date_str = reset_date.strftime("%d/%m/%Y เวลา %H:%M น.")
+                except Exception:
+                    pass
+
             total_spent_in_image += amount
             transactions.append({
                 "amount": amount,
@@ -149,7 +159,7 @@ async def check_multiple_images(ctx):
                         f"• ยอดรวมที่ใช้ไปจากทุกรูป: `{grand_total_spent:,}` Robux\n"
                         f"• ➡️ **ตอนนี้คุณยังส่งได้อีก:** **`{remaining_roblox_quota:,}` Robux**\n\n"
                         f"───────────────────\n"
-                        f"**📅 ลำดับคิวรวมรอรีเซ็ตคืนโควตา (+30 วันจากสลิป)**\n\n"
+                        f"**📅 ลำดับคิวรวมรอรีเซ็ตคืนโควตา (+30 วันอิงตามเวลาในสลิปจริง)**\n\n"
                         f"{full_queue_text}"
         )
             
