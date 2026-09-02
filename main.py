@@ -20,91 +20,114 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-def parse_datetime(date_str_raw):
-    """ฟังก์ชันสกัดเฉพาะวันเวลาและคำนวณ +30 วัน"""
-    # ค้นหารูปแบบ MM/DD/YY HH:MM AM/PM
-    match = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4})\s*(\d{1,2}:\d{2}\s*(?:AM|PM)?)', date_str_raw, re.IGNORECASE)
-    if not match:
-        # ดักจับกรณี OCR อ่านเวลาไม่ติด (ใช้แค่วันที่)
-        match_date_only = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4})', date_str_raw)
-        if match_date_only:
-            d_part = match_date_only.group(1)
-            t_part = "00:00 AM"
-        else:
-            return "ไม่สามารถระบุวันเวลาจากรูปได้"
-    else:
-        d_part = match.group(1)
-        t_part = match.group(2).strip()
-
+def parse_date_and_add_30_days(text):
+    """สกัดวันที่ MM/DD/YY หรือ MM/DD/YYYY แล้ว +30 วัน"""
+    date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4})', text)
+    if not date_match:
+        return "ไม่สามารถระบุวันเวลาจากรูปได้"
+    
+    d_str = date_match.group(1)
+    parts = d_str.split('/')
+    
+    # ดึงส่วนเวลา (ถ้ามี)
+    time_match = re.search(r'(\d{1,2}:\d{2}\s*(?:AM|PM)?)', text, re.IGNORECASE)
+    t_str = time_match.group(1).strip() if time_match else "12:00 PM"
+    
     try:
-        full_str = f"{d_part} {t_part}"
-        year_len = len(d_part.split('/')[-1])
+        year = int(parts[2])
+        if year < 100:
+            year += 2000
+        month = int(parts[0])
+        day = int(parts[1])
         
-        if "AM" in t_part.upper() or "PM" in t_part.upper():
-            fmt = "%m/%d/%y %I:%M %p" if year_len == 2 else "%m/%d/%Y %I:%M %p"
+        # จัดรูปแบบเวลา
+        if "AM" in t_str.upper() or "PM" in t_str.upper():
+            time_parts = re.split(r'[:\s]', t_str)
+            hour = int(time_parts[0])
+            minute = int(time_parts[1])
+            if "PM" in t_str.upper() and hour < 12:
+                hour += 12
+            elif "AM" in t_str.upper() and hour == 12:
+                hour = 0
         else:
-            fmt = "%m/%d/%y %H:%M" if year_len == 2 else "%m/%d/%Y %H:%M"
+            time_parts = t_str.split(':')
+            hour = int(time_parts[0])
+            minute = int(time_parts[1])
 
-        txn_date = datetime.datetime.strptime(full_str, fmt)
-        # บวก 30 วันคืนโควตา
+        txn_date = datetime.datetime(year, month, day, hour, minute)
         reset_date = txn_date + datetime.timedelta(days=30)
         return reset_date.strftime("%d/%m/%Y เวลา %H:%M น.")
     except Exception:
         return "ไม่สามารถระบุวันเวลาจากรูปได้"
 
-def process_roblox_image_fast(image_bytes):
+def process_roblox_image_accurate(image_bytes):
     image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
     width, height = image.size
 
-    # 🔔 ตัดรูปภาพแบ่งตามช่องที่ขีดเส้นแดงไว้
-    # ช่องที่ 1: วันเวลา (ความกว้าง 0% ถึง 18%)
-    crop_col1 = image.crop((0, 0, int(width * 0.18), height))
+    # อ่าน OCR แบบดึงตำแหน่ง bounding box (TSV Format) เพื่อจับคู่ตาม Y-position
+    tsv_data = pytesseract.image_to_data(image, lang='eng+jpn', output_type=pytesseract.Output.DICT)
     
-    # ช่องที่ 3 และ 4: รายการโอน + ยอดเงิน (ความกว้าง 32% ถึง 100%)
-    crop_col3_4 = image.crop((int(width * 0.32), 0, width, height))
+    n_boxes = len(tsv_data['text'])
+    words = []
+    
+    for i in range(n_boxes):
+        text = tsv_data['text'][i].strip()
+        if text:
+            words.append({
+                'text': text,
+                'top': tsv_data['top'][i],
+                'left': tsv_data['left'][i],
+                'height': tsv_data['height'][i]
+            })
 
-    # อ่าน OCR แยกก้อนกันชัดเจน
-    config_col1 = r'--oem 3 --psm 6 -l eng'
-    config_col3_4 = r'--oem 3 --psm 6 -l eng+jpn'
+    # จัดกลุ่มคำให้อยู่ในแถวเดียวกัน (เรียงตาม Y / top position โดยยอมรับ tolerance 35px)
+    rows = []
+    words_sorted = sorted(words, key=lambda w: w['top'])
+    
+    for w in words_sorted:
+        matched_row = False
+        for row in rows:
+            # ถ้าตำแหน่ง top ใกล้เคียงกันถือว่าอยู่แถวเดียวกัน
+            if abs(row['avg_top'] - w['top']) < 35:
+                row['words'].append(w)
+                row['avg_top'] = sum(item['top'] for item in row['words']) / len(row['words'])
+                matched_row = True
+                break
+        if not matched_row:
+            rows.append({'avg_top': w['top'], 'words': [w]})
 
-    text_col1 = pytesseract.image_to_string(crop_col1, config=config_col1)
-    text_col3_4 = pytesseract.image_to_string(crop_col3_4, config=config_col3_4)
-
-    # แยกข้อความออกเป็นรายบรรทัด
-    lines_col1 = [l.strip() for l in text_col1.split('\n') if l.strip()]
-    lines_col3_4 = [l.strip() for l in text_col3_4.split('\n') if l.strip()]
+    # เรียงแถวจากบนลงล่าง
+    rows = sorted(rows, key=lambda r: r['avg_top'])
 
     transactions = []
     total_spent_in_image = 0
-    idx_col1 = 0
 
-    # วนลูปประมวลผลช่อง 3-4 เป็นหลัก
-    for line in lines_col3_4:
-        # ข้ามรายการรับเงิน หรือ โอนไม่สำเร็จ
-        if any(k in line.lower() for k in ['received', 'unable to send']):
-            if idx_col1 < len(lines_col1):
-                idx_col1 += 1
-            continue
+    for row in rows:
+        # เรียงคำในแถวเดียวกันจากซ้ายไปขวา
+        row_words = sorted(row['words'], key=lambda w: w['left'])
+        full_line_text = " ".join([w['text'] for w in row_words])
 
-        # ดักจับรายการโอนออก "Sent Robux to..."
-        match = re.search(r'Sent\s+Robux\s+to\s+(.+?)\s*-\s*.*?(\d[\d,]*)', line, re.IGNORECASE)
-        if match:
-            recipient = match.group(1).strip()
-            recipient = re.sub(r'[\.\-\s]+$', '', recipient)  # ตัดจุดขีดตกค้างท้ายชื่อ
-            amount = int(match.group(2).replace(',', ''))
+        # กรองเฉพาะแถวที่เป็นรายการโอนเงินออกเท่านั้น (มีคำว่า Sent และ -)
+        if "Sent" in full_line_text and "-" in full_line_text:
+            # ดึงยอดเงิน (ตัวเลขหลังเครื่องหมาย -)
+            amount_match = re.search(r'-\s*.*?(\d[\d,]*)', full_line_text)
+            if amount_match:
+                amount = int(amount_match.group(1).replace(',', ''))
+                
+                # ดึงชื่อผู้รับ (ข้อความระหว่าง to และ -)
+                recipient_match = re.search(r'to\s+(.+?)\s*-\s*@?', full_line_text, re.IGNORECASE)
+                recipient = recipient_match.group(1).strip() if recipient_match else "ไม่ระบุชื่อ"
+                recipient = re.sub(r'[\.\-\s]+$', '', recipient)
 
-            # ดึงวันเวลาจาก ช่อง 1 ตามบรรทัดที่ตรงกัน
-            reset_date_str = "ไม่สามารถระบุวันเวลาจากรูปได้"
-            if idx_col1 < len(lines_col1):
-                reset_date_str = parse_datetime(lines_col1[idx_col1])
-                idx_col1 += 1
+                # ดึงวันเวลาจากข้อความในแถวเดียวกัน
+                reset_date_str = parse_date_and_add_30_days(full_line_text)
 
-            total_spent_in_image += amount
-            transactions.append({
-                "amount": amount,
-                "recipient": recipient if recipient else "ไม่ระบุชื่อ",
-                "reset_date_str": reset_date_str
-            })
+                total_spent_in_image += amount
+                transactions.append({
+                    "amount": amount,
+                    "recipient": recipient,
+                    "reset_date_str": reset_date_str
+                })
 
     return transactions, total_spent_in_image
 
@@ -135,7 +158,7 @@ async def check_multiple_images(ctx):
             await processing_msg.edit(content=f"⏳ [██████░░░░] {progress_percent}% • AI กำลังอ่านข้อความรูปที่ {idx}/{len(valid_images)}...")
             
             image_bytes = await img_att.read()
-            results, total_spent = await asyncio.to_thread(process_roblox_image_fast, image_bytes)
+            results, total_spent = await asyncio.to_thread(process_roblox_image_accurate, image_bytes)
             
             all_results.extend(results)
             grand_total_spent += total_spent
@@ -161,8 +184,8 @@ async def check_multiple_images(ctx):
             full_queue_text = full_queue_text[:3800] + "\n\n... (ข้อมูลรายการหนาแน่นเกินไป ระบบตัดการแสดงผลส่วนท้าย) ..."
 
         embed = discord.Embed(
-            title="📊 สรุปประวัติและโควตาคงเหลือ (ระบบรันหลายรูป)",
-            color=discord.Color.purple(),
+            title="📊 สรุปประวัติและโควตาคงเหลือ (ระบบแม่นยำสูง)",
+            color=discord.Color.green(),
             description=f"💡 *รวมยอดประมวลผลจากรูปภาพหลักฐานทั้งหมด `{len(valid_images)}` รูปเรียบร้อยแล้ว*\n\n"
                         f"**💡 Status โควตาในปัจจุบันของคุณ**\n"
                         f"• ลิมิตบัญชีของคุณรายเดือน: `{MONTHLY_MAX_LIMIT:,}` Robux\n"
