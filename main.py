@@ -23,35 +23,30 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 def process_roblox_image_fast(image_bytes):
-    """ฟังก์ชันแกะข้อความเฉพาะโซนตัวเลขและรายชื่อผู้รับเงิน ป้องกัน AI สแกนพลาด"""
     image = Image.open(io.BytesIO(image_bytes))
     
-    # ล็อกเป้าหมายให้อ่านเฉพาะภาษาอังกฤษและตัวเลขเท่านั้นเพื่อความเร็วสูงสุด
+    # อ่านข้อความแบบคงโครงสร้างเดิมไว้
     custom_config = r'--oem 3 --psm 6 -l eng'
     raw_text = pytesseract.image_to_string(image, config=custom_config)
     
     transactions = []
     total_spent_in_image = 0
     
-    # อ้างอิงเวลาปัจจุบัน ณ วินาทีที่ผู้ใช้กดสั่งรันบอต เพื่อนำมานับคิวรีเซ็ตล่วงหน้า 30 วัน
     current_time = datetime.datetime.now()
     reset_time = current_time + datetime.timedelta(days=30)
     
     for line_str in raw_text.split('\n'):
-        if not line_str.strip():
+        line = line_str.strip()
+        if not line:
             continue
-            
-        # ลบช่องว่างออกให้เกลี้ยงเพื่อป้องกัน Tesseract พิมพ์เว้นวรรคเพี้ยน
-        clean_line = re.sub(r'\s+', '', line_str).lower()
         
-        # 🔔 ใช้ Regex ดักจับคำว่า sentrobuxto ดึงชื่อผู้รับ และคว้าตัวเลขกลุ่มท้ายสุดของบรรทัดทันที
-        # ตัดปัญหาเรื่องไอคอนหกเหลี่ยม หรือเครื่องหมายลบเพี้ยนได้อย่างเด็ดขาด 100%
-        roblox_match = re.search(r'sentrobuxto([a-z0-9_\.]+).*?(\d[\d,]*)\s*$', clean_line)
+        # 🔔 ดักเฉพาะบรรทัดโอนออก (Sent Robux to) เท่านั้น
+        # แยกกลุ่ม: (1) ชื่อผู้รับ (2) ตัวเลขยอดโอนที่อยู่ท้ายบรรทัด
+        match = re.search(r'Sent\s+Robux\s+to\s+(.+?)\.?\s*-\s*.*?(\d[\d,]*)', line, re.IGNORECASE)
         
-        if roblox_match:
-            recipient = roblox_match.group(1)
-            # ลบเครื่องหมายจุลภาคคั่นหลักพันออกก่อนนำไปบวกเลข
-            amount_str = roblox_match.group(2).replace(',', '')
+        if match:
+            recipient = match.group(1).strip()
+            amount_str = match.group(2).replace(',', '')
             amount = int(amount_str)
             
             total_spent_in_image += amount
@@ -63,7 +58,6 @@ def process_roblox_image_fast(image_bytes):
             })
                 
     return transactions, total_spent_in_image
-
 @bot.event
 async def on_ready():
     print(f'🤖 บอตเปิดออนไลน์สำเร็จในชื่อ: {bot.user.name}')
