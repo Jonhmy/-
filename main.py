@@ -21,75 +21,83 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 def parse_datetime(date_str_raw):
-    """ฟังก์ชันช่วยแปลงข้อความวันเวลาเป็น Datetime และบวก 30 วัน"""
-    match = re.search(r'(\d{2}/\d{2}/\d{2})\s*(\d{1,2}:\d{2}\s*(?:AM|PM)?)', date_str_raw, re.IGNORECASE)
+    """ฟังก์ชันสกัดเฉพาะวันเวลาและคำนวณ +30 วัน"""
+    # ค้นหารูปแบบ MM/DD/YY HH:MM AM/PM
+    match = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4})\s*(\d{1,2}:\d{2}\s*(?:AM|PM)?)', date_str_raw, re.IGNORECASE)
     if not match:
-        return None
-    
-    d_part = match.group(1)
-    t_part = match.group(2).strip()
-    full_str = f"{d_part} {t_part}"
-    
-    try:
-        if "AM" in t_part.upper() or "PM" in t_part.upper():
-            txn_date = datetime.datetime.strptime(full_str, "%m/%d/%y %I:%M %p")
+        # ดักจับกรณี OCR อ่านเวลาไม่ติด (ใช้แค่วันที่)
+        match_date_only = re.search(r'(\d{1,2}/\d{1,2}/\d{2,4})', date_str_raw)
+        if match_date_only:
+            d_part = match_date_only.group(1)
+            t_part = "00:00 AM"
         else:
-            txn_date = datetime.datetime.strptime(full_str, "%m/%d/%y %H:%M")
+            return "ไม่สามารถระบุวันเวลาจากรูปได้"
+    else:
+        d_part = match.group(1)
+        t_part = match.group(2).strip()
+
+    try:
+        full_str = f"{d_part} {t_part}"
+        year_len = len(d_part.split('/')[-1])
         
+        if "AM" in t_part.upper() or "PM" in t_part.upper():
+            fmt = "%m/%d/%y %I:%M %p" if year_len == 2 else "%m/%d/%Y %I:%M %p"
+        else:
+            fmt = "%m/%d/%y %H:%M" if year_len == 2 else "%m/%d/%Y %H:%M"
+
+        txn_date = datetime.datetime.strptime(full_str, fmt)
+        # บวก 30 วันคืนโควตา
         reset_date = txn_date + datetime.timedelta(days=30)
         return reset_date.strftime("%d/%m/%Y เวลา %H:%M น.")
     except Exception:
-        return None
+        return "ไม่สามารถระบุวันเวลาจากรูปได้"
 
 def process_roblox_image_fast(image_bytes):
     image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
     width, height = image.size
 
-    # ครอบตัดภาพตามเปอร์เซ็นต์ความกว้าง (ตัดคอลัมน์ผู้ส่งตรงกลางออก)
-    # ฝั่งซ้าย: โซน Timestamp (0% - 30%)
-    left_box = (0, 0, int(width * 0.30), height)
-    # ฝั่งขวา: โซน รายการโอน + ยอดเงิน (35% - 100%)
-    right_box = (int(width * 0.35), 0, width, height)
+    # 🔔 ตัดรูปภาพแบ่งตามช่องที่ขีดเส้นแดงไว้
+    # ช่องที่ 1: วันเวลา (ความกว้าง 0% ถึง 18%)
+    crop_col1 = image.crop((0, 0, int(width * 0.18), height))
+    
+    # ช่องที่ 3 และ 4: รายการโอน + ยอดเงิน (ความกว้าง 32% ถึง 100%)
+    crop_col3_4 = image.crop((int(width * 0.32), 0, width, height))
 
-    crop_left = image.crop(left_box)
-    crop_right = image.crop(right_box)
+    # อ่าน OCR แยกก้อนกันชัดเจน
+    config_col1 = r'--oem 3 --psm 6 -l eng'
+    config_col3_4 = r'--oem 3 --psm 6 -l eng+jpn'
 
-    # อ่าน OCR แบบแยกฝั่งอย่างชัดเจน
-    config_eng = r'--oem 3 --psm 6 -l eng'
-    config_multi = r'--oem 3 --psm 6 -l eng+jpn'
+    text_col1 = pytesseract.image_to_string(crop_col1, config=config_col1)
+    text_col3_4 = pytesseract.image_to_string(crop_col3_4, config=config_col3_4)
 
-    left_raw = pytesseract.image_to_string(crop_left, config=config_eng)
-    right_raw = pytesseract.image_to_string(crop_right, config=config_multi)
-
-    left_lines = [l.strip() for l in left_raw.split('\n') if l.strip()]
-    right_lines = [l.strip() for l in right_raw.split('\n') if l.strip()]
+    # แยกข้อความออกเป็นรายบรรทัด
+    lines_col1 = [l.strip() for l in text_col1.split('\n') if l.strip()]
+    lines_col3_4 = [l.strip() for l in text_col3_4.split('\n') if l.strip()]
 
     transactions = []
     total_spent_in_image = 0
-    left_ptr = 0
+    idx_col1 = 0
 
-    for right_line in right_lines:
-        # กรองรายการที่ไม่ใช่โอนออก
-        if any(k in right_line.lower() for k in ['received', 'unable to send']):
-            if left_ptr < len(left_lines):
-                left_ptr += 1
+    # วนลูปประมวลผลช่อง 3-4 เป็นหลัก
+    for line in lines_col3_4:
+        # ข้ามรายการรับเงิน หรือ โอนไม่สำเร็จ
+        if any(k in line.lower() for k in ['received', 'unable to send']):
+            if idx_col1 < len(lines_col1):
+                idx_col1 += 1
             continue
 
-        # ค้นหารายการโอนออก
-        match = re.search(r'Sent\s+Robux\s+to\s+(.+?)\s*-\s*.*?(\d[\d,]*)', right_line, re.IGNORECASE)
+        # ดักจับรายการโอนออก "Sent Robux to..."
+        match = re.search(r'Sent\s+Robux\s+to\s+(.+?)\s*-\s*.*?(\d[\d,]*)', line, re.IGNORECASE)
         if match:
             recipient = match.group(1).strip()
-            recipient = re.sub(r'[\.\-\s]+$', '', recipient) # ตัดจุดขีดตกค้าง
-            
+            recipient = re.sub(r'[\.\-\s]+$', '', recipient)  # ตัดจุดขีดตกค้างท้ายชื่อ
             amount = int(match.group(2).replace(',', ''))
-            
-            # จับคู่วันเวลาจากบรรทัดฝั่งซ้ายที่ตรงกัน
+
+            # ดึงวันเวลาจาก ช่อง 1 ตามบรรทัดที่ตรงกัน
             reset_date_str = "ไม่สามารถระบุวันเวลาจากรูปได้"
-            if left_ptr < len(left_lines):
-                parsed = parse_datetime(left_lines[left_ptr])
-                if parsed:
-                    reset_date_str = parsed
-                left_ptr += 1
+            if idx_col1 < len(lines_col1):
+                reset_date_str = parse_datetime(lines_col1[idx_col1])
+                idx_col1 += 1
 
             total_spent_in_image += amount
             transactions.append({
