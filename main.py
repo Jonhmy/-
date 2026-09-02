@@ -117,41 +117,48 @@ async def check_multiple_images(ctx):
             return
         
         # คำนวณยอดโควตาคงเหลือจากลิมิตรายเดือน
+                # --- (ท่อนวนลูปสแกนรูปภาพด้านบนให้คงไว้เหมือนเดิม) ---
+        
+        # คำนวณยอดโควตาคงเหลือจากลิมิตรายเดือน
         remaining_roblox_quota = MONTHLY_MAX_LIMIT - grand_total_spent
         if remaining_roblox_quota < 0:
             remaining_roblox_quota = 0
         
+        # 🔔 [จุดแก้ไขเด็ดขาด] เปลี่ยนจาก Field แยก มารวบรวมข้อความยาวเป็นก้อนเดียว
+        queue_text_list = []
+        for queue_idx, tx in enumerate(all_results, start=1):
+            queue_text_list.append(
+                f"**{queue_idx}.** 💰 โอนออก `-{tx['amount']:,}` Robux\n"
+                f"└ ผู้รับ: `{tx['recipient']}` | คืนโควตา: `{tx['reset_date_str']}`"
+            )
+        
+        # รวมรายการทั้งหมดคั่นด้วยการเว้นบรรทัดใหม่
+        full_queue_text = "\n\n".join(queue_text_list)
+        
+        # ตรวจสอบความยาวตัวอักษรไม่ให้เกินขีดจำกัด Discord (สูงสุด 4,000 ตัวอักษรใน Description)
+        if len(full_queue_text) > 3800:
+            full_queue_text = full_queue_text[:3800] + "\n\n... (ข้อมูลรายการหนาแน่นเกินไป ระบบตัดการแสดงผลส่วนท้าย) ..."
+
         embed = discord.Embed(
             title="📊 สรุปประวัติและโควตาคงเหลือ (ระบบรันหลายรูป)",
             color=discord.Color.purple(),
-            description=f"💡 *รวมยอดประมวลผลจากรูปภาพหลักฐานทั้งหมด `{len(valid_images)}` รูปเรียบร้อยแล้ว*"
+            description=f"💡 *รวมยอดประมวลผลจากรูปภาพหลักฐานทั้งหมด `{len(valid_images)}` รูปเรียบร้อยแล้ว*\n\n"
+                        f"**💡 Status โควตาในปัจจุบันของคุณ**\n"
+                        f"• ลิมิตบัญชีของคุณรายเดือน: `{MONTHLY_MAX_LIMIT:,}` Robux\n"
+                        f"• ยอดรวมที่ใช้ไปจากทุกรูป: `{grand_total_spent:,}` Robux\n"
+                        f"• ➡️ **ตอนนี้คุณยังส่งได้อีก:** **`{remaining_roblox_quota:,}` Robux**\n\n"
+                        f"───────────────────\n"
+                        f"**📅 ลำดับคิวรวมรอรีเซ็ตคืนโควตา (+30 วัน)**\n\n"
+                        f"{full_queue_text}"
         )
-        
-        embed.add_field(
-            name="💡 Status โควตาในปัจจุบันของคุณ",
-            value=f"• ลิมิตบัญชีของคุณรายเดือน: `{MONTHLY_MAX_LIMIT:,}` Robux\n"
-                  f"• ยอดรวมที่ใช้ไปจากทุกรูป: `{grand_total_spent:,}` Robux\n"
-                  f"• ➡️ **ตอนนี้คุณยังส่งได้อีก:** **`{remaining_roblox_quota:,}` Robux**",
-            inline=False
-        )
-        
-        embed.add_field(name="───────────────", value="**📅 ลำดับคิวรวมรอรีเซ็ตคืนโควตา (+30 วัน)**", inline=False)
-        
-        # จัดเรียงลำดับเวลาคิวรวมทั้งหมด จากใกล้รีเซ็ตที่สุดไปหลังสุด
-        # (ในเวอร์ชันคำนวณเวลากดบอต ยอดจะมาพร้อมกัน แต่ถ้าอนาคตแกะวันที่ได้ จะเรียงตามคิวจริงให้ทันที)
-        for queue_idx, tx in enumerate(all_results, start=1):
-            embed.add_field(
-                name=f"{queue_idx}. 💰 โอนออก -{tx['amount']:,} Robux",
-                value=f"**ผู้รับ:** {tx['recipient']}\n**วันคืนโควตา:** `{tx['reset_date_str']}`",
-                inline=False
-            )
             
-        # สแกนเสร็จสมบูรณ์ลบหลอดโหลด และส่งตาราง Embed สรุปรวมยอดแสดงผลทันที
+        embed.set_footer(text="คำนวณและมัดรวมข้อมูลผ่านระบบอัปเดตความเสถียร 100%")
+        
+        # สแกนเสร็จสมบูรณ์ลบหลอดโหลด และส่งตารางสรุปรวมยอดแสดงผลทันที
         await ctx.send(embed=embed)
         await processing_msg.delete()
         
     except Exception as e:
         print(f"❌ Error occurred during process: {str(e)}")
         await processing_msg.edit(content=f"❌ **เกิดข้อผิดพลาดในการประมวลผลกลุ่มรูปภาพ:** `รายละเอียด: {str(e)}`")
-
 bot.run(TOKEN)
