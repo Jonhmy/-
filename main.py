@@ -3,7 +3,7 @@ import re
 import datetime
 import discord
 from discord.ext import commands
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 import io
 import pytesseract
 import asyncio
@@ -60,19 +60,60 @@ def parse_date_and_add_30_days(text):
     except Exception:
         return "ไม่สามารถระบุวันเวลาจากรูปได้"
 
-def process_roblox_image_accurate(image_bytes):
-    image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+def preprocess_image_for_ocr(image):
+    """
+    ปรับแต่งรูปก่อนส่งเข้า OCR เพื่อเพิ่มความแม่นยำในการอ่านตัวเลข/ตัวหนังสือ
+    - แปลงเป็นขาวดำ
+    - ขยายขนาดรูป (ถ้ารูปเล็ก) เพราะ Tesseract อ่านตัวหนังสือเล็กๆ ได้แย่
+    - เพิ่ม contrast และ sharpen ให้ขอบตัวอักษรคมขึ้น
+    """
+    image = image.convert('L')  # grayscale
+
+    # ขยายรูปถ้าด้านที่สั้นกว่ามีขนาดเล็กกว่า ~1500px (ช่วยเรื่องสกรีนช็อตความละเอียดต่ำ/ถูกบีบอัด)
     width, height = image.size
+    target_min_dim = 1500
+    scale = max(1.0, target_min_dim / min(width, height))
+    if scale > 1.0:
+        image = image.resize((int(width * scale), int(height * scale)), Image.LANCZOS)
+
+    image = ImageOps.autocontrast(image, cutoff=1)
+    image = ImageEnhance.Contrast(image).enhance(1.6)
+    image = ImageEnhance.Sharpness(image).enhance(2.0)
+
+    return image
+
+
+def fix_common_ocr_digit_errors(number_text):
+    """แก้ตัวอักษรที่ OCR มักอ่านสลับกับตัวเลขในสตริงตัวเลข เช่น O->0, l/I->1, S->5, B->8"""
+    replacements = {'O': '0', 'o': '0', 'l': '1', 'I': '1', 'S': '5', 's': '5', 'B': '8'}
+    for wrong, right in replacements.items():
+        number_text = number_text.replace(wrong, right)
+    return number_text
+
+
+def process_roblox_image_accurate(image_bytes, min_confidence=40):
+    raw_image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+    image = preprocess_image_for_ocr(raw_image)
 
     # อ่าน OCR แบบดึงตำแหน่ง bounding box (TSV Format) เพื่อจับคู่ตาม Y-position
-    tsv_data = pytesseract.image_to_data(image, lang='eng+jpn', output_type=pytesseract.Output.DICT)
-    
+    # psm 6 = มองรูปเป็นบล็อกข้อความเรียงบรรทัด เหมาะกับรายการธุรกรรมแบบนี้
+    # ใช้ lang='eng' อย่างเดียวเพราะข้อความในสลิปเป็นภาษาอังกฤษ การใส่ jpn เข้ามาด้วยทำให้ OCR สับสนและอ่านผิดบ่อยขึ้น
+    custom_config = r'--oem 3 --psm 6'
+    tsv_data = pytesseract.image_to_data(
+        image, lang='eng', config=custom_config, output_type=pytesseract.Output.DICT
+    )
+
     n_boxes = len(tsv_data['text'])
     words = []
-    
+
     for i in range(n_boxes):
         text = tsv_data['text'][i].strip()
-        if text:
+        try:
+            conf = float(tsv_data['conf'][i])
+        except (ValueError, TypeError):
+            conf = -1
+        # ตัดคำที่ OCR มั่นใจต่ำมากทิ้ง (ลดโอกาสอ่านตัวอักษรมั่วมาปนในบรรทัด)
+        if text and conf >= min_confidence:
             words.append({
                 'text': text,
                 'top': tsv_data['top'][i],
@@ -80,15 +121,17 @@ def process_roblox_image_accurate(image_bytes):
                 'height': tsv_data['height'][i]
             })
 
-    # จัดกลุ่มคำให้อยู่ในแถวเดียวกัน (เรียงตาม Y / top position โดยยอมรับ tolerance 35px)
+    # จัดกลุ่มคำให้อยู่ในแถวเดียวกัน โดยใช้ tolerance ที่ปรับตามความสูงตัวหนังสือจริง
+    # (แทนค่าคงที่ 35px ซึ่งใช้ไม่ได้กับสกรีนช็อตความละเอียด/ขนาดตัวอักษรต่างกัน)
     rows = []
     words_sorted = sorted(words, key=lambda w: w['top'])
-    
+
     for w in words_sorted:
         matched_row = False
+        row_tolerance = max(15, w['height'] * 0.8)
         for row in rows:
             # ถ้าตำแหน่ง top ใกล้เคียงกันถือว่าอยู่แถวเดียวกัน
-            if abs(row['avg_top'] - w['top']) < 35:
+            if abs(row['avg_top'] - w['top']) < row_tolerance:
                 row['words'].append(w)
                 row['avg_top'] = sum(item['top'] for item in row['words']) / len(row['words'])
                 matched_row = True
@@ -108,12 +151,18 @@ def process_roblox_image_accurate(image_bytes):
         full_line_text = " ".join([w['text'] for w in row_words])
 
         # กรองเฉพาะแถวที่เป็นรายการโอนเงินออกเท่านั้น (มีคำว่า Sent และ -)
-        if "Sent" in full_line_text and "-" in full_line_text:
-            # ดึงยอดเงิน (ตัวเลขหลังเครื่องหมาย -)
-            amount_match = re.search(r'-\s*.*?(\d[\d,]*)', full_line_text)
+        # ยอมรับ "5ent"/"Sen†" ฯลฯ แบบหลวมขึ้นเล็กน้อยด้วยการเทียบแบบไม่สนตัวพิมพ์ใหญ่เล็ก
+        if re.search(r'sent', full_line_text, re.IGNORECASE) and "-" in full_line_text:
+            # ดึงยอดเงิน: หาเฉพาะตัวเลขที่อยู่ติดกับ "-" ทันที (กัน false-positive จากเลขวันที่/เวลาในบรรทัดเดียวกัน)
+            amount_match = re.search(r'-\s*\$?\s*([A-Za-z0-9,]{2,})', full_line_text)
+            amount = None
             if amount_match:
-                amount = int(amount_match.group(1).replace(',', ''))
-                
+                raw_amount = fix_common_ocr_digit_errors(amount_match.group(1))
+                digits_only = re.sub(r'[^\d]', '', raw_amount)
+                if digits_only:
+                    amount = int(digits_only)
+
+            if amount is not None:
                 # ดึงชื่อผู้รับ (ข้อความระหว่าง to และ -)
                 recipient_match = re.search(r'to\s+(.+?)\s*-\s*@?', full_line_text, re.IGNORECASE)
                 recipient = recipient_match.group(1).strip() if recipient_match else "ไม่ระบุชื่อ"
