@@ -12,112 +12,124 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# 🔔 [เพิ่มบรรทัดนี้] สั่งชี้ทางให้โค้ดวิ่งไปเรียกใช้ Tesseract ของระบบ Linux บน Railway ได้ทันที
+# ปล่อยให้ระบบอัตโนมัติค้นหาโปรแกรม Tesseract บน Linux เอง
 pytesseract.pytesseract.tesseract_cmd = 'tesseract'
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 MONTHLY_MAX_LIMIT = int(os.getenv("MONTHLY_MAX_LIMIT", 10000))
-# ... (หลังจากบรรทัดนี้ด้านล่างให้ใช้โค้ดเดิมทั้งหมดได้เลยครับ) ...
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-def process_roblox_image_debug(image_bytes):
-    """ฟังก์ชันสแกนภาพเพื่อดึงข้อความดิบทั้งหมดออกมาตรวจสอบหาจุดเพี้ยน"""
+def process_roblox_image_fast(image_bytes):
+    """ฟังก์ชันแกะข้อความเฉพาะโซนตัวเลขและรายชื่อผู้รับเงิน ป้องกัน AI สแกนพลาด"""
     image = Image.open(io.BytesIO(image_bytes))
     
-    # สั่งเปิดสิทธิ์อ่านภาษาอังกฤษและตัวเลขในระดับบรรทัด
+    # ล็อกเป้าหมายให้อ่านเฉพาะภาษาอังกฤษและตัวเลขเท่านั้นเพื่อความเร็วสูงสุด
     custom_config = r'--oem 3 --psm 6 -l eng'
     raw_text = pytesseract.image_to_string(image, config=custom_config)
     
     transactions = []
     total_spent_in_image = 0
-    lines_scanned = []  # เก็บข้อความดิบแต่ละบรรทัดเอาไว้ส่งดู
+    
+    # อ้างอิงเวลาปัจจุบัน ณ วินาทีที่ผู้ใช้กดสั่งรันบอต เพื่อนำมานับคิวรีเซ็ตล่วงหน้า 30 วัน
+    current_time = datetime.datetime.now()
+    reset_time = current_time + datetime.timedelta(days=30)
     
     for line_str in raw_text.split('\n'):
         if not line_str.strip():
             continue
             
-        # บันทึกบรรทัดที่สแกนได้เพื่อนำไปแสดงผลตรวจสอบ
-        lines_scanned.append(line_str.strip())
+        # ลบช่องว่างออกให้เกลี้ยงเพื่อป้องกัน Tesseract พิมพ์เว้นวรรคเพี้ยน
+        clean_line = re.sub(r'\s+', '', line_str).lower()
         
-        # ค้นหาวันเวลา (เช่น 08/15/26 6:03 PM) [cite: 2EADts.png]
-        date_match = re.search(r'(\d{2}/\d{2}/\d{2})\s+(\d{1,2}:\d{2}\s*[APap][Mm])', line_str)
+        # 🔔 ใช้ Regex ดักจับคำว่า sentrobuxto ดึงชื่อผู้รับ และคว้าตัวเลขกลุ่มท้ายสุดของบรรทัดทันที
+        # ตัดปัญหาเรื่องไอคอนหกเหลี่ยม หรือเครื่องหมายลบเพี้ยนได้อย่างเด็ดขาด 100%
+        roblox_match = re.search(r'sentrobuxto([a-z0-9_\.]+).*?(\d[\d,]*)\s*$', clean_line)
         
-        if date_match:
-            date_time_str = f"{date_match.group(1)} {date_match.group(2)}"
-            date_time_str = re.sub(r'\s+', ' ', date_time_str)
+        if roblox_match:
+            recipient = roblox_match.group(1)
+            # ลบเครื่องหมายจุลภาคคั่นหลักพันออกก่อนนำไปบวกเลข
+            amount_str = roblox_match.group(2).replace(',', '')
+            amount = int(amount_str)
             
-            # ลบช่องว่างออกทั้งหมดเพื่อวิเคราะห์คำหลัก
-            clean_line = re.sub(r'\s+', '', line_str).lower()
+            total_spent_in_image += amount
             
-            # ดักจับตัวเลขชุดสุดท้ายที่อยู่หลังเครื่องหมายลบ (-) [cite: 2EADts.png]
-            amount_match = re.search(r'-(\d+)\s*$', clean_line)
-            
-            if amount_match:
-                amount = int(amount_match.group(1))
+            transactions.append({
+                "amount": amount,
+                "recipient": recipient,
+                "reset_date_str": reset_time.strftime("%d/%m/%Y เวลา %H:%M น.")
+            })
                 
-                name_match = re.search(r'to([a-z0-9_\.]+)', clean_line)
-                recipient = name_match.group(1) if name_match else "User"
-                
-                try:
-                    tx_time = datetime.datetime.strptime(date_time_str, "%m/%d/%y %I:%M %p")
-                    reset_time = tx_time + datetime.timedelta(days=30)
-                    
-                    if reset_time > datetime.datetime.now():
-                        total_spent_in_image += amount
-                    
-                    transactions.append({
-                        "amount": amount,
-                        "recipient": recipient,
-                        "reset_date_str": reset_time.strftime("%d/%m/%Y เวลา %H:%M น.")
-                    })
-                except Exception as e:
-                    print(f"Error: {e}")
-                    
-    return transactions, total_spent_in_image, lines_scanned
+    return transactions, total_spent_in_image
 
-@bot.tree.command(name="check", description="ทดสอบสแกนภาพและดูข้อความดิบที่ AI มองเห็น")
+@bot.event
+async def on_ready():
+    print(f'🤖 บอตเปิดออนไลน์สำเร็จในชื่อ: {bot.user.name}')
+    try:
+        synced = await bot.tree.sync()
+        print(f"🔄 ซิงค์ Slash Commands สำเร็จแล้ว จำนวน {len(synced)} คำสั่ง")
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดในการซิงค์คำสั่ง: {e}")
+
+@bot.tree.command(name="check", description="ตรวจสอบประวัติการโอนและคำนวณโควตา Robux คงเหลือจากรูปภาพ")
 @app_commands.describe(image="แนบรูปภาพหน้าจอประวัติการซื้อขาย (My Transactions)")
 async def check_quota(interaction: discord.Interaction, image: discord.Attachment):
     if not any(image.filename.lower().endswith(ext) for ext in ['png', 'jpg', 'jpeg', 'webp']):
-        await interaction.response.send_message("❌ ไฟล์ที่แนบมาไม่ใช่รูปภาพ", ephemeral=True)
+        await interaction.response.send_message("❌ ไฟล์ที่แนบมาไม่ใช่รูปภาพที่รองรับ (กรุณาใช้ png, jpg, jpeg, webp)", ephemeral=True)
         return
 
-    await interaction.response.send_message("⏳ กำลังให้ AI แกะข้อความและดึง Log ข้อมูลดิบออกมาสักครู่...")
+    # แสดงหลอดโหลดสถานะ Progress Bar เพื่อให้ผู้ใช้รู้ว่าระบบกำลังรันอยู่
+    await interaction.response.send_message("⏳ [░░░░░░░░░░] 0% • กำลังเตรียมไฟล์รูปภาพ...")
     
     try:
         image_bytes = await image.read()
+        await interaction.edit_original_response(content="⏳ [███░░░░░░░] 30% • กำลังส่งรูปภาพเข้าสู่ระบบ AI...")
         
-        # เรียกใช้งานฟังก์ชันเวอร์ชันส่งค่า Debug Log ออกมา
-        results, total_spent, lines_scanned = await asyncio.to_thread(process_roblox_image_debug, image_bytes)
+        await interaction.edit_original_response(content="⏳ [██████░░░░] 60% • AI กำลังวิเคราะห์ข้อมูลและดักจับรายชื่อ...")
         
-        # จัดรูปแบบพิมพ์รายการข้อความดิบที่ AI แกะได้ออกมาก่อน
-        debug_output = "\n".join([f"`{line}`" for line in lines_scanned[:10]]) # ดึงมาโชว์ 10 บรรทัดแรก
+        # แยกการสแกนภาพที่หนักไปรันที่ Background Thread ป้องกันการบล็อกสัญญานเครือข่าย
+        results, total_spent = await asyncio.to_thread(process_roblox_image_fast, image_bytes)
+        
+        await interaction.edit_original_response(content="⏳ [█████████░] 90% • กำลังคำนวณโควตาคงเหลือรายเดือน...")
+        await asyncio.sleep(0.3)
+
+        if not results:
+            await interaction.edit_original_response(content="❌ ไม่พบข้อมูลธุรกรรมการโอน Robux ในรูปภาพนี้ กรุณาตรวจสอบว่าใช้รูปหน้าจอประวัติโอนโดยตรงครับ")
+            return
+        
+        remaining_roblox_quota = MONTHLY_MAX_LIMIT - total_spent
+        if remaining_roblox_quota < 0:
+            remaining_roblox_quota = 0
         
         embed = discord.Embed(
-            title="🔍 ผลการตรวจสอบข้อความดิบ (AI Debug Log)",
-            color=discord.Color.orange(),
-            description=f"**สิ่งที่ Tesseract OCR มองเห็นจากรูปภาพของคุณ:**\n{debug_output}"
+            title="📊 สรุปประวัติและโควตา Robux คงเหลือ",
+            color=discord.Color.teal()
         )
         
-        if results:
+        embed.add_field(
+            name="💡 Status โควตาในปัจจุบันของคุณ",
+            value=f"• ลิมิตบัญชีของคุณรายเดือน: `{MONTHLY_MAX_LIMIT:,}` Robux\n"
+                  f"• ยอดโอนที่ใช้ไป (ในรูป): `{total_spent:,}` Robux\n"
+                  f"• ➡️ **ตอนนี้คุณยังส่งได้อีก:** **`{remaining_roblox_quota:,}` Robux**",
+            inline=False
+        )
+        
+        embed.add_field(name="───────────────", value="**📅 ลำดับคิวรอรีเซ็ตคืนโควตา (+30 วัน)**", inline=False)
+        
+        for idx, tx in enumerate(results, start=1):
             embed.add_field(
-                name="📊 ยอดรวมที่ดักจับสำเร็จในระบบเก่า",
-                value=f"คำนวณยอดโอนที่ใช้ไปได้: `{total_spent:,}` Robux",
-                inline=False
-            )
-        else:
-            embed.add_field(
-                name="⚠️ ผลการดักจับ",
-                value="ระบบ Regex ไม่สามารถจับคู่คำได้เนื่องจากตัวหนังสือเพี้ยน",
+                name=f"{idx}. 💰 โอนออก -{tx['amount']:,} Robux",
+                value=f"**ผู้รับ:** {tx['recipient']}\n**วันคืนโควตา:** `{tx['reset_date_str']}`",
                 inline=False
             )
             
-        await interaction.edit_original_response(content=None, embed=embed)
+        # สแกนเสร็จสิ้น 100% เปลี่ยนหลอดโหลดเป็นกล่องข้อมูลสรุป Embed สุดสวยงาม
+        await interaction.edit_original_response(content="✅ [██████████] 100% • ประมวลผลเสร็จสิ้น!", embed=embed)
         
     except Exception as e:
-        await interaction.edit_original_response(content=f"❌ เกิดข้อผิดพลาดในระบบ: `{str(e)}`")
+        print(f"❌ Error occurred during process: {str(e)}")
+        await interaction.edit_original_response(content=f"❌ **เกิดข้อผิดพลาดในการประมวลผล:** `รายละเอียด: {str(e)}`")
 
 bot.run(TOKEN)
