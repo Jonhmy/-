@@ -25,8 +25,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 def process_roblox_image_fast(image_bytes):
     image = Image.open(io.BytesIO(image_bytes))
     
-    # อ่านข้อความแบบคงโครงสร้างเดิมไว้
-    custom_config = r'--oem 3 --psm 6 -l eng'
+    # 🔔 เพิ่ม +jpn เพื่อให้อ่านอักษรภาษาญี่ปุ่นและสัญลักษณ์พิเศษได้
+    custom_config = r'--oem 3 --psm 6 -l eng+jpn'
     raw_text = pytesseract.image_to_string(image, config=custom_config)
     
     transactions = []
@@ -40,12 +40,18 @@ def process_roblox_image_fast(image_bytes):
         if not line:
             continue
         
-        # 🔔 ดักเฉพาะบรรทัดโอนออก (Sent Robux to) เท่านั้น
-        # แยกกลุ่ม: (1) ชื่อผู้รับ (2) ตัวเลขยอดโอนที่อยู่ท้ายบรรทัด
-        match = re.search(r'Sent\s+Robux\s+to\s+(.+?)\.?\s*-\s*.*?(\d[\d,]*)', line, re.IGNORECASE)
+        # กรองรายการรับเงิน หรือรายการที่ส่งไม่สำเร็จออก
+        if any(k in line.lower() for k in ['received', 'unable to send']):
+            continue
+
+        # 🔔 Regex สแกนหาคำว่า "Sent Robux to" แล้วเก็บชื่อผู้รับ (ก้อนกลาง) และยอดเงิน (ก้อนท้าย)
+        match = re.search(r'Sent\s+Robux\s+to\s+(.+?)\s*[\.-]*\s*@?\s*(\d[\d,]*)', line, re.IGNORECASE)
         
         if match:
             recipient = match.group(1).strip()
+            # ทำความสะอาดสัญลักษณ์ตกค้างท้ายชื่อ เช่น จุด หรือ ขีด
+            recipient = re.sub(r'[\.\-\s]+$', '', recipient)
+            
             amount_str = match.group(2).replace(',', '')
             amount = int(amount_str)
             
@@ -53,7 +59,7 @@ def process_roblox_image_fast(image_bytes):
             
             transactions.append({
                 "amount": amount,
-                "recipient": recipient,
+                "recipient": recipient if recipient else "ไม่ระบุชื่อ",
                 "reset_date_str": reset_time.strftime("%d/%m/%Y เวลา %H:%M น.")
             })
                 
