@@ -1,105 +1,95 @@
 import os
 import re
-import cv2
 import datetime
-import numpy as np
 import discord
 from discord.ext import commands
 from PIL import Image
 import io
-import easyocr
+import pytesseract
 import asyncio
 from dotenv import load_dotenv
 
 load_dotenv()
 
+pytesseract.pytesseract.tesseract_cmd = 'tesseract'
+
 TOKEN = os.getenv("DISCORD_TOKEN")
 MONTHLY_MAX_LIMIT = int(os.getenv("MONTHLY_MAX_LIMIT", 10000))
-
-# โหลด EasyOCR รองรับทั้งภาษาอังกฤษและภาษาญี่ปุ่น
-reader = easyocr.Reader(['en', 'ja'], gpu=False)
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-def process_roblox_image_fast(image_bytes):
-    # 1. แปลงไฟล์ภาพเป็น OpenCV Format
-    file_bytes = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-    # 2. อ่านข้อความและตำแหน่งพิกัดทั้งหมดในภาพด้วย EasyOCR
-    # detail=1 จะคืนค่า [bounding_box, text, confidence]
-    ocr_results = reader.readtext(gray, detail=1)
+def parse_datetime(date_str_raw):
+    """ฟังก์ชันช่วยแปลงข้อความวันเวลาเป็น Datetime และบวก 30 วัน"""
+    match = re.search(r'(\d{2}/\d{2}/\d{2})\s*(\d{1,2}:\d{2}\s*(?:AM|PM)?)', date_str_raw, re.IGNORECASE)
+    if not match:
+        return None
     
-    # Sort รายการตามแนวตั้ง (Y-axis) จากบนลงล่าง
-    ocr_results.sort(key=lambda x: x[0][0][1])
-
-    # 3. จัดกลุ่มข้อความที่อยู่ในบรรทัด (แถว) เดียวกันตามพิกัด Y
-    rows = []
-    threshold_y = 18  # ระยะพิกเซลที่ถือว่าเป็นบรรทัดเดียวกัน
-
-    for box, text, prob in ocr_results:
-        y_center = (box[0][1] + box[2][1]) / 2
-        matched = False
+    d_part = match.group(1)
+    t_part = match.group(2).strip()
+    full_str = f"{d_part} {t_part}"
+    
+    try:
+        if "AM" in t_part.upper() or "PM" in t_part.upper():
+            txn_date = datetime.datetime.strptime(full_str, "%m/%d/%y %I:%M %p")
+        else:
+            txn_date = datetime.datetime.strptime(full_str, "%m/%d/%y %H:%M")
         
-        for row in rows:
-            if abs(row['y_center'] - y_center) < threshold_y:
-                row['items'].append((box[0][0], text)) # เก็บพิกัด X และข้อความ
-                matched = True
-                break
-                
-        if not matched:
-            rows.append({
-                'y_center': y_center,
-                'items': [(box[0][0], text)]
-            })
+        reset_date = txn_date + datetime.timedelta(days=30)
+        return reset_date.strftime("%d/%m/%Y เวลา %H:%M น.")
+    except Exception:
+        return None
+
+def process_roblox_image_fast(image_bytes):
+    image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+    width, height = image.size
+
+    # ครอบตัดภาพตามเปอร์เซ็นต์ความกว้าง (ตัดคอลัมน์ผู้ส่งตรงกลางออก)
+    # ฝั่งซ้าย: โซน Timestamp (0% - 30%)
+    left_box = (0, 0, int(width * 0.30), height)
+    # ฝั่งขวา: โซน รายการโอน + ยอดเงิน (35% - 100%)
+    right_box = (int(width * 0.35), 0, width, height)
+
+    crop_left = image.crop(left_box)
+    crop_right = image.crop(right_box)
+
+    # อ่าน OCR แบบแยกฝั่งอย่างชัดเจน
+    config_eng = r'--oem 3 --psm 6 -l eng'
+    config_multi = r'--oem 3 --psm 6 -l eng+jpn'
+
+    left_raw = pytesseract.image_to_string(crop_left, config=config_eng)
+    right_raw = pytesseract.image_to_string(crop_right, config=config_multi)
+
+    left_lines = [l.strip() for l in left_raw.split('\n') if l.strip()]
+    right_lines = [l.strip() for l in right_raw.split('\n') if l.strip()]
 
     transactions = []
     total_spent_in_image = 0
+    left_ptr = 0
 
-    # 4. ประมวลผลแต่ละแถวที่จัดกลุ่มเรียบร้อยแล้ว
-    for row in rows:
-        # เรียงข้อความในแถวเดียวกันจากซ้ายไปขวาตามพิกัด X
-        row['items'].sort(key=lambda x: x[0])
-        full_line_str = " ".join([item[1] for item in row['items']])
-
-        # กรองรายการที่ไม่ใช่การโอนออกทิ้ง
-        if any(k in full_line_str.lower() for k in ['received', 'unable to send']):
+    for right_line in right_lines:
+        # กรองรายการที่ไม่ใช่โอนออก
+        if any(k in right_line.lower() for k in ['received', 'unable to send']):
+            if left_ptr < len(left_lines):
+                left_ptr += 1
             continue
 
-        # ตรวจจับโครงสร้างการโอนออก
-        # 4.1 หายอด Robux ท้ายบรรทัด (เช่น - 50 หรือ - 1,000)
-        amount_match = re.search(r'-\s*.*?(\d[\d,]*)', full_line_str)
-        # 4.2 หาชื่อผู้รับเงิน (ข้อความหลัง Sent Robux to)
-        recipient_match = re.search(r'Sent\s+Robux\s+to\s+(.+?)(?=\s*-\s*|\s*$)', full_line_str, re.IGNORECASE)
-        # 4.3 หาวันเวลาซีกซ้ายสุด (เช่น 08/30/26 9:10 PM)
-        date_match = re.search(r'(\d{2}/\d{2}/\d{2})\s*(\d{1,2}:\d{2}\s*(?:AM|PM)?)', full_line_str, re.IGNORECASE)
-
-        if amount_match and recipient_match:
-            amount = int(amount_match.group(1).replace(',', ''))
+        # ค้นหารายการโอนออก
+        match = re.search(r'Sent\s+Robux\s+to\s+(.+?)\s*-\s*.*?(\d[\d,]*)', right_line, re.IGNORECASE)
+        if match:
+            recipient = match.group(1).strip()
+            recipient = re.sub(r'[\.\-\s]+$', '', recipient) # ตัดจุดขีดตกค้าง
             
-            recipient = recipient_match.group(1).strip()
-            recipient = re.sub(r'[\.\-\s]+$', '', recipient) # ตัดสัญลักษณ์ตกค้าง
-
+            amount = int(match.group(2).replace(',', ''))
+            
+            # จับคู่วันเวลาจากบรรทัดฝั่งซ้ายที่ตรงกัน
             reset_date_str = "ไม่สามารถระบุวันเวลาจากรูปได้"
-            if date_match:
-                d_part = date_match.group(1)
-                t_part = date_match.group(2).strip()
-                datetime_str = f"{d_part} {t_part}"
-                
-                try:
-                    if "AM" in t_part.upper() or "PM" in t_part.upper():
-                        txn_date = datetime.datetime.strptime(datetime_str, "%m/%d/%y %I:%M %p")
-                    else:
-                        txn_date = datetime.datetime.strptime(datetime_str, "%m/%d/%y %H:%M")
-                    
-                    # คำนวณวันคืนโควตา +30 วันจาก Timestamp ในรูป
-                    reset_date = txn_date + datetime.timedelta(days=30)
-                    reset_date_str = reset_date.strftime("%d/%m/%Y เวลา %H:%M น.")
-                except Exception:
-                    pass
+            if left_ptr < len(left_lines):
+                parsed = parse_datetime(left_lines[left_ptr])
+                if parsed:
+                    reset_date_str = parsed
+                left_ptr += 1
 
             total_spent_in_image += amount
             transactions.append({
@@ -113,11 +103,6 @@ def process_roblox_image_fast(image_bytes):
 @bot.event
 async def on_ready():
     print(f'🤖 บอตเปิดออนไลน์สำเร็จในชื่อ: {bot.user.name}')
-    try:
-        synced = await bot.tree.sync()
-        print(f"🔄 ซิงค์ Slash Commands สำเร็จแล้ว จำนวน {len(synced)} คำสั่ง")
-    except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดในการซิงค์คำสั่ง: {e}")
 
 @bot.command(name="check")
 async def check_multiple_images(ctx):
@@ -148,7 +133,7 @@ async def check_multiple_images(ctx):
             grand_total_spent += total_spent
             
         await processing_msg.edit(content="⏳ [█████████░] 90% • กำลังสรุปยอดรวม...")
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.2)
 
         if not all_results:
             await processing_msg.edit(content="❌ สแกนเสร็จสิ้น แต่ไม่พบข้อมูลรายการโอน Robux")
